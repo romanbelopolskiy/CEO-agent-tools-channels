@@ -256,4 +256,6 @@ Based on the official [Anthropic Telegram Channel Plugin](https://github.com/ant
 
 ## License
 
-All rights reserved. Copyright Roman Belopolskiy / [4sell.ai](https://4sell.ai)
+Source Available — free to use, fork, and modify. Commercial use (selling the software or services based on it) is not permitted without a separate license. See [LICENSE](./LICENSE) for details.
+
+Copyright Roman Belopolskiy / [4sell.ai](https://4sell.ai) — for commercial licensing: CEO@4sell.ai
