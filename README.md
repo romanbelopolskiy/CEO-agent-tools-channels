@@ -1,24 +1,41 @@
-# claude-telegram-MCP-multi-agent
+# CEO Agent Tools & Channels
 
-Telegram channel MCP server for Claude Code. Run multiple independent Claude Code agents, each with its own Telegram bot, skills, and tools.
+Multi-agent toolkit for startup founders. Manage isolated Claude Code agents through separate Telegram chats — each with its own skills, tools, and personality.
 
-Unlike the official Telegram plugin (which stores the bot token globally), this server is configured **per-project** via environment variables — so you can run as many bots as you want in parallel.
+**Author:** Roman Belopolskiy, CEO [4sell.ai](https://4sell.ai)
+
+## Why this exists
+
+Running a startup means juggling SMM, development, analytics, ops — all at once. AI agents help, but managing them through a single Claude Code terminal or a cluttered web UI is painful. Too many context switches, too many wasted tokens.
+
+This project was born out of frustration with managing agents through a single interface. The idea is simple: **one Telegram chat = one agent with its own isolated context**. You text your SMM bot — it writes posts. You text your dev bot — it ships code. No cross-contamination, no token waste, no cognitive overhead.
+
+Built on top of [Claude Code Channels](https://docs.anthropic.com/en/docs/claude-code/channels) — a feature that lets external systems push messages into a running Claude Code session.
 
 ## How it works
 
 ```
-Telegram user
+You (Telegram)
      │
-     ▼
-Telegram Bot API  ◄── long polling ──  this MCP server  ◄── stdio ──►  Claude Code
-                  ── send_message ──►                    ── channel ──►
+     ├── @smm_bot        ──►  Claude Code session #1  (CLAUDE.md: SMM skills)
+     ├── @dev_bot         ──►  Claude Code session #2  (CLAUDE.md: frontend dev)
+     └── @senior_dev_bot  ──►  Claude Code session #3  (CLAUDE.md: architecture + deploy)
 ```
 
-1. The server connects to Telegram via Bot API and polls for new messages
-2. When a message arrives, it emits a `notifications/claude/channel` event to Claude Code
-3. Claude Code processes the message using its configured skills, tools, and CLAUDE.md prompt
-4. Claude Code replies by calling the `send_telegram_message` tool
-5. The server sends the reply back through Telegram
+Under the hood:
+
+```
+Telegram Bot API  ◄── long polling ──  MCP server (this project)  ◄── stdio ──►  Claude Code
+                  ── send_message ──►                              ── channel ──►
+```
+
+1. Each agent runs as a separate Claude Code session with its own `CLAUDE.md`, `.mcp.json`, and `.claude/skills/`
+2. Each session connects to its own Telegram bot via this MCP server
+3. When you send a message in Telegram, it arrives as a channel event in Claude Code
+4. Claude processes it with its configured skills and replies back through Telegram
+5. Permission requests (tool approvals) are forwarded to Telegram — approve or deny right from your phone
+
+Unlike the official Telegram plugin (which stores the bot token globally), this server is configured **per-project** via environment variables — so you can run as many agents as you need.
 
 ## Quick start
 
@@ -29,8 +46,8 @@ Open [@BotFather](https://t.me/BotFather) in Telegram, run `/newbot`, and save t
 ### 2. Install
 
 ```bash
-git clone https://github.com/terorex-web/claude-telegram-MCP-multi-agent.git
-cd claude-telegram-MCP-multi-agent
+git clone https://github.com/terorex-web/CEO-agent-tools-channels.git
+cd CEO-agent-tools-channels
 npm install
 npm run build
 ```
@@ -44,7 +61,7 @@ Add to your project's `.mcp.json`:
   "mcpServers": {
     "telegram": {
       "command": "node",
-      "args": ["/absolute/path/to/claude-telegram-MCP-multi-agent/dist/index.js"],
+      "args": ["/absolute/path/to/CEO-agent-tools-channels/dist/index.js"],
       "env": {
         "TELEGRAM_BOT_TOKEN": "123456:ABC-DEF...",
         "TELEGRAM_BOT_NAME": "my-bot"
@@ -69,24 +86,27 @@ claude --channels server:telegram
 
 ## Multi-agent setup
 
-The whole point of this project: run **multiple bots** from different project directories, each with its own personality and tools.
+The core use case: run **multiple agents** from separate directories, each with its own Telegram bot, personality, and toolset.
 
-### Create separate directories
+### Directory structure
 
 ```
 my-agents/
 ├── smm-bot/
 │   ├── .mcp.json       ← bot token #1
-│   └── CLAUDE.md       ← "You are an SMM manager..."
+│   ├── CLAUDE.md       ← "You are an SMM manager..."
+│   └── .claude/skills/ ← create-post, write-comment, find-accounts
 ├── dev-bot/
 │   ├── .mcp.json       ← bot token #2
-│   └── CLAUDE.md       ← "You are a frontend developer..."
+│   ├── CLAUDE.md       ← "You are a frontend developer..."
+│   └── .claude/skills/ ← fix-bug, update-page
 └── dev-senior/
     ├── .mcp.json       ← bot token #3
-    └── CLAUDE.md       ← "You are a senior engineer..."
+    ├── CLAUDE.md       ← "You are a senior engineer..."
+    └── .claude/skills/ ← refactor, deploy, review-pr
 ```
 
-### Each `.mcp.json` points to the same server, different token
+### Each `.mcp.json` points to the same server binary, different token
 
 **smm-bot/.mcp.json:**
 ```json
@@ -94,7 +114,7 @@ my-agents/
   "mcpServers": {
     "telegram": {
       "command": "node",
-      "args": ["/path/to/dist/index.js"],
+      "args": ["/path/to/CEO-agent-tools-channels/dist/index.js"],
       "env": {
         "TELEGRAM_BOT_TOKEN": "TOKEN_FOR_SMM_BOT",
         "TELEGRAM_BOT_NAME": "smm-bot"
@@ -110,7 +130,7 @@ my-agents/
   "mcpServers": {
     "telegram": {
       "command": "node",
-      "args": ["/path/to/dist/index.js"],
+      "args": ["/path/to/CEO-agent-tools-channels/dist/index.js"],
       "env": {
         "TELEGRAM_BOT_TOKEN": "TOKEN_FOR_DEV_BOT",
         "TELEGRAM_BOT_NAME": "dev-bot"
@@ -120,20 +140,20 @@ my-agents/
 }
 ```
 
-### Launch each agent in a separate terminal
+### Launch each agent
 
 ```bash
-# Terminal 1
+# Terminal 1 — SMM agent
 cd smm-bot && claude --channels server:telegram
 
-# Terminal 2
+# Terminal 2 — Dev agent
 cd dev-bot && claude --channels server:telegram
 
-# Terminal 3
+# Terminal 3 — Senior dev agent
 cd dev-senior && claude --channels server:telegram
 ```
 
-Each session reads its own `.mcp.json`, `CLAUDE.md`, and `.claude/skills/` — completely independent.
+Each session reads its own `.mcp.json`, `CLAUDE.md`, and `.claude/skills/` — fully isolated contexts, zero token leakage between agents.
 
 ## Environment variables
 
@@ -172,8 +192,8 @@ By default, the server runs in `allowlist` mode — only paired users can send m
 
 **Pairing flow:**
 
-1. Unknown user sends a message → bot replies with a 6-char code
-2. You tell Claude Code to pair that code → user is added to the allowlist
+1. Unknown user sends a message to the bot — bot replies with a 6-char code
+2. You tell Claude Code to pair that code — user is added to the allowlist
 3. User can now send messages that reach Claude Code
 
 **Open mode:**
@@ -196,15 +216,15 @@ Action: Run npm test
 Reply "yes abcde" or "no abcde"
 ```
 
-Reply with `yes abcde` or `no abcde` to approve or deny — directly from Telegram.
+Approve or deny tool execution right from your phone — no need to sit at the terminal.
 
 ## Architecture
 
 ```
 src/
-├── index.ts          # Entry point: starts MCP server + polling loop
+├── index.ts          # Entry point: MCP server + Telegram polling loop
 ├── config.ts         # Environment variables → typed config
-├── telegram.ts       # Telegram Bot API client (zero dependencies, pure fetch)
+├── telegram.ts       # Telegram Bot API client (zero deps, pure fetch)
 ├── access.ts         # Allowlist, pairing codes, policy management
 ├── channel.ts        # Emits MCP channel notifications to Claude Code
 ├── permissions.ts    # Permission relay (Claude Code ↔ Telegram)
