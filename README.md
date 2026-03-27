@@ -1,8 +1,23 @@
 # CEO Agent Tools & Channels
 
+> Fork of the official [Anthropic Telegram Channel Plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram), extended for multi-agent workflows.
+
 Multi-agent toolkit for startup founders. Manage isolated Claude Code agents through separate Telegram chats — each with its own skills, tools, and personality.
 
 **Author:** Roman Belopolskiy, CEO [4sell.ai](https://4sell.ai)
+
+## What's different from the official plugin
+
+The [official `telegram@claude-plugins-official`](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram) plugin stores the bot token globally — one token per machine. This project solves that:
+
+| | Official plugin | This project |
+|---|---|---|
+| Bot token | Global (one per machine) | Per-project (via env vars) |
+| Multiple bots | Not supported | Run N bots in parallel |
+| Runtime | Bun | Node.js >= 18 |
+| Telegram lib | Grammy | Pure fetch (zero deps) |
+| Config | `/telegram:configure` | `.mcp.json` env vars |
+| Isolation | Shared state | Each agent has its own context |
 
 ## Why this exists
 
@@ -34,8 +49,6 @@ Telegram Bot API  ◄── long polling ──  MCP server (this project)  ◄�
 3. When you send a message in Telegram, it arrives as a channel event in Claude Code
 4. Claude processes it with its configured skills and replies back through Telegram
 5. Permission requests (tool approvals) are forwarded to Telegram — approve or deny right from your phone
-
-Unlike the official Telegram plugin (which stores the bot token globally), this server is configured **per-project** via environment variables — so you can run as many agents as you need.
 
 ## Quick start
 
@@ -230,6 +243,10 @@ src/
 ├── permissions.ts    # Permission relay (Claude Code ↔ Telegram)
 └── tools.ts          # MCP tool definitions and handlers
 ```
+
+## Acknowledgements
+
+Based on the official [Anthropic Telegram Channel Plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram) (`telegram@claude-plugins-official`). Rewritten from scratch in TypeScript/Node.js with multi-agent support as the primary design goal.
 
 ## Requirements
 
