@@ -91,15 +91,19 @@ async function main() {
     });
   }
 
-  // Start polling — flush old updates first
+  // Start polling — claim exclusive polling access and flush old updates
+  await telegram.deleteWebhook(true);
   let offset: number | undefined;
 
   // Skip any messages that arrived before this session
-  const pending = await telegram.getUpdates(undefined, 100);
+  const pending = await telegram.getUpdates(undefined, 0, 100);
   if (pending.length > 0) {
     offset = pending[pending.length - 1].update_id + 1;
     log(`Skipped ${pending.length} old update(s)`);
   }
+
+  // Track users who have already been notified about pairing (debounce)
+  const pairingNotified = new Set<number>();
 
   const poll = async () => {
     while (true) {
@@ -129,19 +133,26 @@ async function main() {
 
           // Check access
           if (!access.isAllowed(userId)) {
-            const code = access.generatePairingCode(userId, msg.chat.id);
-            await telegram.sendMessage(
-              msg.chat.id,
-              [
-                `🔑 You are not authorized.`,
-                ``,
-                `Your pairing code: \`${code}\``,
-                ``,
-                `Send this code to the Claude Code session to pair.`,
-              ].join("\n")
-            );
+            // Only send pairing message once per user per session
+            if (!pairingNotified.has(userId)) {
+              pairingNotified.add(userId);
+              const code = access.generatePairingCode(userId, msg.chat.id);
+              await telegram.sendMessage(
+                msg.chat.id,
+                [
+                  `🔑 You are not authorized.`,
+                  ``,
+                  `Your pairing code: \`${code}\``,
+                  ``,
+                  `Send this code to the Claude Code session to pair.`,
+                ].join("\n")
+              );
+            }
             continue;
           }
+
+          // User is now authorized — clear pairing debounce if present
+          pairingNotified.delete(userId);
 
           // Emit to Claude Code
           log(

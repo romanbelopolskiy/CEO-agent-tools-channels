@@ -71,12 +71,20 @@ export class TelegramClient {
 
   async getUpdates(
     offset?: number,
-    timeout: number = 1
+    timeout: number = 1,
+    limit?: number
   ): Promise<TelegramUpdate[]> {
     return this.request<TelegramUpdate[]>("getUpdates", {
       offset,
       timeout,
+      limit,
       allowed_updates: ["message"],
+    });
+  }
+
+  async deleteWebhook(dropPendingUpdates: boolean = false): Promise<boolean> {
+    return this.request<boolean>("deleteWebhook", {
+      drop_pending_updates: dropPendingUpdates,
     });
   }
 
