@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Launch Claude Code with Telegram bot selection
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOTS_FILE="$HOME/.claude/telegram-bots.json"
 
 # Ensure bots file exists
@@ -54,5 +55,21 @@ if [[ -z "$SELECTED" ]]; then
   exit 1
 fi
 
+# Generate MCP config with the selected bot name in env
+MCP_CONFIG=$(cat <<EOF
+{
+  "mcpServers": {
+    "ceo-agent-tools-channels": {
+      "command": "node",
+      "args": ["${SCRIPT_DIR}/dist/index.js"],
+      "env": {
+        "TELEGRAM_BOT_NAME": "${SELECTED}"
+      }
+    }
+  }
+}
+EOF
+)
+
 echo "Starting Claude Code with bot: $SELECTED"
-TELEGRAM_BOT_NAME="$SELECTED" claude --dangerously-load-development-channels server:ceo-agent-tools-channels "$@"
+claude --mcp-config "$MCP_CONFIG" --dangerously-load-development-channels server:ceo-agent-tools-channels "$@"
