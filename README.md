@@ -12,12 +12,14 @@ The [official `telegram@claude-plugins-official`](https://github.com/anthropics/
 
 | | Official plugin | This project |
 |---|---|---|
-| Bot token | Global (one per machine) | Per-project (via env vars) |
+| Bot token | Global (one per machine) | Per-bot registry (`~/.claude/telegram-bots.json`) |
 | Multiple bots | Not supported | Run N bots in parallel |
 | Runtime | Bun | Node.js >= 18 |
 | Telegram lib | Grammy | Pure fetch (zero deps) |
-| Config | `/telegram:configure` | `.mcp.json` env vars |
+| Config | `/telegram:configure` | `claude-tg` launcher with interactive bot selection |
 | Isolation | Shared state | Each agent has its own context |
+| Process cleanup | Zombie processes on crash | Auto-exit on stdin close / signals |
+| Pairing | Per-session | Per-bot persistent access lists |
 
 ## Why this exists
 
@@ -65,37 +67,56 @@ npm install
 npm run build
 ```
 
-### 3. Configure
-
-Add to your project's `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "telegram": {
-      "command": "node",
-      "args": ["/absolute/path/to/CEO-agent-tools-channels/dist/index.js"],
-      "env": {
-        "TELEGRAM_BOT_TOKEN": "123456:ABC-DEF...",
-        "TELEGRAM_BOT_NAME": "my-bot"
-      }
-    }
-  }
-}
-```
-
-### 4. Launch Claude Code with channels
+### 3. Add `claude-tg` to PATH
 
 ```bash
-claude --channels server:telegram
+ln -sf "$(pwd)/claude-tg" /opt/homebrew/bin/claude-tg
 ```
+
+### 4. Launch
+
+```bash
+claude-tg
+```
+
+On first run with no bots configured, it will prompt you:
+
+```
+No bots configured. Let's add one.
+
+Bot name (e.g. ceo, support): devops
+Bot token (from @BotFather): 123456:ABC-DEF...
+Bot 'devops' saved.
+Starting Claude Code with bot: devops
+```
+
+On subsequent runs:
+- **One bot** — auto-selects it
+- **Multiple bots** — shows a numbered picker
 
 ### 5. Pair your Telegram account
 
 1. Send any message to your bot in Telegram
 2. The bot replies with a 6-character pairing code
-3. In Claude Code, say: "pair code `abc123`"
-4. Done — your messages now reach Claude Code
+3. In Claude Code, say: `pair code abc123`
+4. The bot sends a confirmation: "Bot authorized under name devops"
+5. Done — your messages now reach Claude Code
+
+## Bot registry
+
+Bots are stored in `~/.claude/telegram-bots.json`:
+
+```json
+{
+  "devops": { "token": "123456:ABC..." },
+  "smm": { "token": "789012:DEF..." },
+  "senior": { "token": "345678:GHI..." }
+}
+```
+
+Each bot gets its own access list at `~/.claude/telegram-access-{name}.json`.
+
+You can add bots manually to the JSON file or let `claude-tg` prompt you on first run.
 
 ## Multi-agent setup
 
@@ -106,76 +127,66 @@ The core use case: run **multiple agents** from separate directories, each with 
 ```
 my-agents/
 ├── smm-bot/
-│   ├── .mcp.json       ← bot token #1
 │   ├── CLAUDE.md       ← "You are an SMM manager..."
 │   └── .claude/skills/ ← create-post, write-comment, find-accounts
 ├── dev-bot/
-│   ├── .mcp.json       ← bot token #2
 │   ├── CLAUDE.md       ← "You are a frontend developer..."
 │   └── .claude/skills/ ← fix-bug, update-page
 └── dev-senior/
-    ├── .mcp.json       ← bot token #3
     ├── CLAUDE.md       ← "You are a senior engineer..."
     └── .claude/skills/ ← refactor, deploy, review-pr
-```
-
-### Each `.mcp.json` points to the same server binary, different token
-
-**smm-bot/.mcp.json:**
-```json
-{
-  "mcpServers": {
-    "telegram": {
-      "command": "node",
-      "args": ["/path/to/CEO-agent-tools-channels/dist/index.js"],
-      "env": {
-        "TELEGRAM_BOT_TOKEN": "TOKEN_FOR_SMM_BOT",
-        "TELEGRAM_BOT_NAME": "smm-bot"
-      }
-    }
-  }
-}
-```
-
-**dev-bot/.mcp.json:**
-```json
-{
-  "mcpServers": {
-    "telegram": {
-      "command": "node",
-      "args": ["/path/to/CEO-agent-tools-channels/dist/index.js"],
-      "env": {
-        "TELEGRAM_BOT_TOKEN": "TOKEN_FOR_DEV_BOT",
-        "TELEGRAM_BOT_NAME": "dev-bot"
-      }
-    }
-  }
-}
 ```
 
 ### Launch each agent
 
 ```bash
 # Terminal 1 — SMM agent
-cd smm-bot && claude --channels server:telegram
+cd smm-bot && claude-tg    # select "smm"
 
 # Terminal 2 — Dev agent
-cd dev-bot && claude --channels server:telegram
+cd dev-bot && claude-tg    # select "devops"
 
 # Terminal 3 — Senior dev agent
-cd dev-senior && claude --channels server:telegram
+cd dev-senior && claude-tg # select "senior"
 ```
 
-Each session reads its own `.mcp.json`, `CLAUDE.md`, and `.claude/skills/` — fully isolated contexts, zero token leakage between agents.
+Each session reads its own `CLAUDE.md` and `.claude/skills/` — fully isolated contexts, zero token leakage between agents. The bot token is resolved from the shared registry by name.
+
+### Manual setup (without `claude-tg`)
+
+If you prefer manual configuration, add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ceo-agent-tools-channels": {
+      "command": "node",
+      "args": ["/absolute/path/to/CEO-agent-tools-channels/dist/index.js"],
+      "env": {
+        "TELEGRAM_BOT_NAME": "devops"
+      }
+    }
+  }
+}
+```
+
+Then launch:
+
+```bash
+claude --dangerously-load-development-channels server:ceo-agent-tools-channels
+```
 
 ## Environment variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | yes | — | Bot token from @BotFather |
-| `TELEGRAM_BOT_NAME` | no | `telegram` | Name used in MCP registration and channel `source` attribute |
+| `TELEGRAM_BOT_TOKEN` | no* | — | Bot token from @BotFather |
+| `TELEGRAM_BOT_NAME` | no | `telegram` | Bot name — used to look up token in `~/.claude/telegram-bots.json` |
 | `TELEGRAM_POLL_INTERVAL` | no | `1000` | Polling interval in ms |
-| `TELEGRAM_ACCESS_LIST` | no | `./access.json` | Path to the access control file |
+| `TELEGRAM_ACCESS_LIST` | no | `~/.claude/telegram-access-{name}.json` | Path to the access control file |
+| `DEBUG` | no | `0` | Set to `1` to enable debug logging |
+
+\* Either `TELEGRAM_BOT_TOKEN` or a matching entry in `~/.claude/telegram-bots.json` is required.
 
 ## Tools
 
@@ -207,7 +218,10 @@ By default, the server runs in `allowlist` mode — only paired users can send m
 
 1. Unknown user sends a message to the bot — bot replies with a 6-char code
 2. You tell Claude Code to pair that code — user is added to the allowlist
-3. User can now send messages that reach Claude Code
+3. Bot confirms in Telegram: "Bot authorized under name {botName}"
+4. User can now send messages that reach Claude Code
+
+Pairing codes are single-use and per-user (sending multiple messages won't generate duplicate codes).
 
 **Open mode:**
 
@@ -231,14 +245,77 @@ Reply "yes abcde" or "no abcde"
 
 Approve or deny tool execution right from your phone — no need to sit at the terminal.
 
+## Debug mode
+
+Debug mode enables verbose logging across all modules. Useful for troubleshooting bot connectivity, pairing issues, and channel communication.
+
+### Enabling
+
+Set `DEBUG=1` in the MCP server's environment.
+
+**Via `claude-tg`** — edit `claude-tg` and change `"DEBUG": "0"` to `"DEBUG": "1"` in the env block.
+
+**Via `.mcp.json`:**
+```json
+{
+  "env": {
+    "TELEGRAM_BOT_NAME": "devops",
+    "DEBUG": "1"
+  }
+}
+```
+
+### Where logs go
+
+All logs are written to **stderr** (MCP uses stdout for protocol messages). Claude Code captures stderr and shows it in the MCP server output.
+
+### Log prefixes
+
+| Prefix | Module | What it logs |
+|---|---|---|
+| `[telegram-mcp]` | `index.ts` | Startup, bot connection, polling, pairing codes, authorized messages |
+| `[config:debug]` | `config.ts` | Env vars, bot registry lookup, token resolution |
+| `[telegram-api:debug]` | `telegram.ts` | Every Telegram API call and errors |
+| `[access:debug]` | `access.ts` | Access file load/save, pair code lookup, allowlist changes |
+| `[tools:debug]` | `tools.ts` | Tool invocations with arguments, pair results |
+| `[channel:debug]` | `channel.ts` | Channel notifications emitted to Claude Code (full JSON payload) |
+
+### Example debug output
+
+```
+[telegram-mcp] Starting MCP server...
+[config:debug] TELEGRAM_BOT_NAME="devops"
+[config:debug] Token found in registry for "devops"
+[telegram-mcp] Config loaded: bot="devops", accessList="~/.claude/telegram-access-devops.json", poll=1000ms
+[telegram-mcp] Bot connected: @cc_devopsbot (CC devops bot)
+[telegram-mcp] MCP server started on stdio
+[telegram-mcp] Polling started
+[telegram-mcp] Pairing code "abc123" generated for user 186356295 (chat 186356295)
+[access:debug] pair("abc123"): success, allowedUsers=[186356295]
+[telegram-mcp] Sending authorization confirmation to chat 186356295 for bot "devops"
+[channel:debug] Emitting channel notification: {"method":"notifications/claude/channel",...}
+```
+
+### Disabling
+
+Set `DEBUG=0` or remove the `DEBUG` env var. Non-debug logs (`[telegram-mcp]`) always print regardless.
+
+## Process cleanup
+
+The MCP server automatically exits when:
+- Claude Code closes stdin (normal exit or crash)
+- `SIGINT`, `SIGTERM`, or `SIGHUP` signal is received
+
+This prevents zombie processes from accumulating after sessions end.
+
 ## Architecture
 
 ```
 src/
-├── index.ts          # Entry point: MCP server + Telegram polling loop
-├── config.ts         # Environment variables → typed config
+├── index.ts          # Entry point: MCP server + Telegram polling loop + process cleanup
+├── config.ts         # Bot registry (~/.claude/telegram-bots.json) + env vars → typed config
 ├── telegram.ts       # Telegram Bot API client (zero deps, pure fetch)
-├── access.ts         # Allowlist, pairing codes, policy management
+├── access.ts         # Allowlist, pairing codes, policy management (per-bot files)
 ├── channel.ts        # Emits MCP channel notifications to Claude Code
 ├── permissions.ts    # Permission relay (Claude Code ↔ Telegram)
 └── tools.ts          # MCP tool definitions and handlers

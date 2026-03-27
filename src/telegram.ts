@@ -1,5 +1,8 @@
 const BASE_URL = "https://api.telegram.org";
 
+const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
+function debug(msg: string) { if (DEBUG) process.stderr.write(`[telegram-api:debug] ${msg}\n`); }
+
 export interface TelegramUser {
   id: number;
   is_bot: boolean;
@@ -47,6 +50,7 @@ export class TelegramClient {
     params?: Record<string, unknown>
   ): Promise<T> {
     const url = `${this.baseUrl}/${method}`;
+    debug(`API call: ${method}(${params ? JSON.stringify(params) : ""})`);
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -54,14 +58,19 @@ export class TelegramClient {
     });
 
     if (!res.ok) {
-      throw new Error(`Telegram API error: ${res.status} ${res.statusText}`);
+      const errMsg = `Telegram API error: ${res.status} ${res.statusText}`;
+      debug(`API error: ${method} -> ${errMsg}`);
+      throw new Error(errMsg);
     }
 
     const data = (await res.json()) as TelegramResponse<T>;
     if (!data.ok) {
-      throw new Error(`Telegram API error: ${data.description || "unknown"}`);
+      const errMsg = `Telegram API error: ${data.description || "unknown"}`;
+      debug(`API error: ${method} -> ${errMsg}`);
+      throw new Error(errMsg);
     }
 
+    debug(`API ok: ${method}`);
     return data.result;
   }
 

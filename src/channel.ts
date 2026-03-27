@@ -1,6 +1,9 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { TelegramMessage } from "./telegram.js";
 
+const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
+function debug(msg: string) { if (DEBUG) process.stderr.write(`[channel:debug] ${msg}\n`); }
+
 /**
  * Emit a channel notification to Claude Code.
  *
@@ -19,7 +22,7 @@ export function emitChannelMessage(
   const userId = message.from?.id || 0;
   const chatId = message.chat.id;
 
-  server.notification({
+  const notification = {
     method: "notifications/claude/channel",
     params: {
       content: text,
@@ -31,7 +34,9 @@ export function emitChannelMessage(
         first_name: message.from?.first_name || "",
       },
     },
-  });
+  };
+  debug(`Emitting channel notification: ${JSON.stringify(notification)}`);
+  server.notification(notification);
 }
 
 /**

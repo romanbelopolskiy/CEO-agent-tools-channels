@@ -10,14 +10,20 @@ import { emitChannelMessage, emitPermissionResponse } from "./channel.js";
 import { registerTools } from "./tools.js";
 
 async function main() {
+  log("Starting MCP server...");
   const config = loadConfig();
+  log(`Config loaded: bot="${config.botName}", accessList="${config.accessListPath}", poll=${config.pollInterval}ms`);
+  debug(`Token prefix: ${config.botToken.substring(0, 10)}...`);
+
   const telegram = new TelegramClient(config.botToken);
   const access = new AccessControl(config.accessListPath);
   const permissions = new PermissionManager(telegram);
 
   // Verify bot token
+  log("Verifying bot token with Telegram API...");
   const me = await telegram.getMe();
   log(`Bot connected: @${me.username} (${me.first_name})`);
+  debug(`Bot ID: ${me.id}, is_bot: ${me.is_bot}`);
 
   // Create MCP server
   const server = new Server(
@@ -75,9 +81,11 @@ async function main() {
   };
 
   // Start stdio transport
+  log("Connecting stdio transport...");
   const transport = new StdioServerTransport();
   await server.connect(transport);
   log("MCP server started on stdio");
+  debug(`Server name: telegram-channel-${config.botName}`);
 
   // Exit when parent (Claude Code) closes stdin
   process.stdin.on("end", () => {
@@ -98,6 +106,7 @@ async function main() {
   }
 
   // Start polling — claim exclusive polling access and flush old updates
+  log("Deleting webhook and flushing old updates...");
   await telegram.deleteWebhook(true);
   let offset: number | undefined;
 
@@ -106,7 +115,10 @@ async function main() {
   if (pending.length > 0) {
     offset = pending[pending.length - 1].update_id + 1;
     log(`Skipped ${pending.length} old update(s)`);
+  } else {
+    debug("No pending updates to skip");
   }
+  log("Polling started");
 
   // Track users who have already been notified about pairing (debounce)
   const pairingNotified = new Set<number>();
@@ -115,15 +127,22 @@ async function main() {
     while (true) {
       try {
         const updates = await telegram.getUpdates(offset, 1);
+        if (updates.length > 0) {
+          debug(`Got ${updates.length} update(s)`);
+        }
 
         for (const update of updates) {
           offset = update.update_id + 1;
 
-          if (!update.message?.text || !update.message.from) continue;
+          if (!update.message?.text || !update.message.from) {
+            debug(`Skipping update ${update.update_id}: no text or no from`);
+            continue;
+          }
 
           const msg = update.message;
           const userId = msg.from!.id;
           const text = msg.text!;
+          debug(`Update ${update.update_id}: user=${userId} (@${msg.from!.username || msg.from!.first_name}) text="${text.substring(0, 50)}"`);
 
           // Check if this is a permission response
           const permResult = permissions.tryMatch(text);
@@ -139,10 +158,12 @@ async function main() {
 
           // Check access
           if (!access.isAllowed(userId)) {
+            debug(`User ${userId} not in allowlist`);
             // Only send pairing message once per user per session
             if (!pairingNotified.has(userId)) {
               pairingNotified.add(userId);
               const code = access.generatePairingCode(userId, msg.chat.id);
+              log(`Pairing code "${code}" generated for user ${userId} (chat ${msg.chat.id})`);
               await telegram.sendMessage(
                 msg.chat.id,
                 [
@@ -153,12 +174,16 @@ async function main() {
                   `Send this code to the Claude Code session to pair.`,
                 ].join("\n")
               );
+              debug(`Pairing message sent to chat ${msg.chat.id}`);
+            } else {
+              debug(`User ${userId} already notified about pairing, skipping`);
             }
             continue;
           }
 
           // User is now authorized — clear pairing debounce if present
           pairingNotified.delete(userId);
+          debug(`User ${userId} authorized, emitting channel message`);
 
           // Emit to Claude Code
           log(
@@ -180,8 +205,16 @@ async function main() {
   });
 }
 
-function log(message: string): void {
+const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
+
+export function log(message: string): void {
   process.stderr.write(`[telegram-mcp] ${message}\n`);
+}
+
+export function debug(message: string): void {
+  if (DEBUG) {
+    process.stderr.write(`[telegram-mcp:debug] ${message}\n`);
+  }
 }
 
 function sleep(ms: number): Promise<void> {

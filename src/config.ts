@@ -2,6 +2,9 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 
+const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
+function debug(msg: string) { if (DEBUG) process.stderr.write(`[config:debug] ${msg}\n`); }
+
 export interface Config {
   botToken: string;
   botName: string;
@@ -30,14 +33,20 @@ function loadBotsRegistry(): BotsRegistry {
 
 export function loadConfig(): Config {
   const botName = process.env.TELEGRAM_BOT_NAME || "telegram";
+  debug(`TELEGRAM_BOT_NAME="${botName}"`);
+  debug(`TELEGRAM_BOT_TOKEN=${process.env.TELEGRAM_BOT_TOKEN ? "set" : "not set"}`);
   let botToken = process.env.TELEGRAM_BOT_TOKEN;
 
   // If no token in env, look up by name in ~/.claude/telegram-bots.json
   if (!botToken) {
     const registry = loadBotsRegistry();
+    debug(`Registry bots: ${JSON.stringify(Object.keys(registry))}`);
     const entry = registry[botName];
     if (entry?.token) {
       botToken = entry.token;
+      debug(`Token found in registry for "${botName}"`);
+    } else {
+      debug(`No token in registry for "${botName}"`);
     }
   }
 

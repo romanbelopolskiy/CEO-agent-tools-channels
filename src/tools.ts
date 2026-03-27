@@ -6,6 +6,10 @@ import {
 import type { TelegramClient } from "./telegram.js";
 import type { AccessControl } from "./access.js";
 
+const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
+function debug(msg: string) { if (DEBUG) process.stderr.write(`[tools:debug] ${msg}\n`); }
+function log(msg: string) { process.stderr.write(`[telegram-mcp] ${msg}\n`); }
+
 const TOOLS = [
   {
     name: "send_telegram_message",
@@ -69,6 +73,7 @@ export function registerTools(
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+    log(`Tool called: ${name}(${JSON.stringify(args)})`);
 
     switch (name) {
       case "send_telegram_message": {
@@ -112,13 +117,15 @@ export function registerTools(
               };
             }
             const result = access.pair(code);
+            debug(`pair result: ${JSON.stringify(result)}`);
             if (result.success) {
               // Notify user in Telegram
               if (result.chatId) {
+                log(`Sending authorization confirmation to chat ${result.chatId} for bot "${botName}"`);
                 telegram.sendMessage(
                   result.chatId,
                   `✅ Бот авторизован под именем *${botName}*. Теперь вы можете отправлять сообщения.`
-                ).catch(() => {});
+                ).catch((err) => { log(`Failed to send auth confirmation: ${err}`); });
               }
               return {
                 content: [
