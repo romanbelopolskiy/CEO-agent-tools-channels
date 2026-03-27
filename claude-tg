@@ -55,4 +55,4 @@ if [[ -z "$SELECTED" ]]; then
 fi
 
 echo "Starting Claude Code with bot: $SELECTED"
-TELEGRAM_BOT_NAME="$SELECTED" claude --channels server:ceo-agent-tools-channels --dangerously-load-development-channels "$@"
+TELEGRAM_BOT_NAME="$SELECTED" claude --dangerously-load-development-channels server:ceo-agent-tools-channels "$@"

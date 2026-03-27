@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ceo-agent-tools-channels": {
+      "command": "node",
+      "args": ["./dist/index.js"]
+    }
+  }
+}
