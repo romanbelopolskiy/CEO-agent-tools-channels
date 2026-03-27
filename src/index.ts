@@ -33,6 +33,12 @@ async function main() {
         },
         tools: {},
       },
+      instructions: [
+        `This is a Telegram channel plugin (bot: "${config.botName}").`,
+        `When a user asks you to pair with a code (e.g. "pair code abc123"), call the telegram_access tool with action "pair" and the code.`,
+        `Do NOT run "claude pair" shell command — that is an unrelated pair-coding feature.`,
+        `Use send_telegram_message to reply to Telegram users. The chat_id comes from channel message metadata.`,
+      ].join("\n"),
     }
   );
 

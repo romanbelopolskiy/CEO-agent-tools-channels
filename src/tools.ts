@@ -29,7 +29,7 @@ const TOOLS = [
   {
     name: "telegram_access",
     description:
-      "Manage Telegram access control: pair/unpair users, list allowed users, set policy.",
+      "Manage Telegram access control. Use action 'pair' with a pairing code to authorize a Telegram user. Also supports: unpair, list, set-policy.",
     inputSchema: {
       type: "object" as const,
       properties: {
