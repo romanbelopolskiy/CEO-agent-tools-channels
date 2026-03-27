@@ -22,14 +22,13 @@ export function emitChannelMessage(
   server.notification({
     method: "notifications/claude/channel",
     params: {
-      channel: {
-        source,
-        metadata: {
-          chat_id: String(chatId),
-          user_id: String(userId),
-          username,
-        },
-        content: text,
+      content: text,
+      source,
+      meta: {
+        chat_id: String(chatId),
+        user_id: String(userId),
+        username,
+        first_name: message.from?.first_name || "",
       },
     },
   });
@@ -47,8 +46,8 @@ export function emitPermissionResponse(
   server.notification({
     method: "notifications/claude/channel/permission",
     params: {
-      requestId,
-      approved,
+      request_id: requestId,
+      behavior: approved ? "allow" : "deny",
     },
   });
 }

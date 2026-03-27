@@ -60,7 +60,8 @@ const TOOLS = [
 export function registerTools(
   server: Server,
   telegram: TelegramClient,
-  access: AccessControl
+  access: AccessControl,
+  botName: string
 ): void {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: TOOLS,
@@ -112,6 +113,13 @@ export function registerTools(
             }
             const result = access.pair(code);
             if (result.success) {
+              // Notify user in Telegram
+              if (result.chatId) {
+                telegram.sendMessage(
+                  result.chatId,
+                  `✅ Бот авторизован под именем *${botName}*. Теперь вы можете отправлять сообщения.`
+                ).catch(() => {});
+              }
               return {
                 content: [
                   {

@@ -27,13 +27,17 @@ async function main() {
     },
     {
       capabilities: {
+        experimental: {
+          "claude/channel": {},
+          "claude/channel/permission": {},
+        },
         tools: {},
       },
     }
   );
 
   // Register tools
-  registerTools(server, telegram, access);
+  registerTools(server, telegram, access, config.botName);
 
   // Handle permission requests from Claude Code via fallback notification handler
   server.fallbackNotificationHandler = async (notification) => {
@@ -69,8 +73,33 @@ async function main() {
   await server.connect(transport);
   log("MCP server started on stdio");
 
-  // Start polling
+  // Exit when parent (Claude Code) closes stdin
+  process.stdin.on("end", () => {
+    log("stdin closed, exiting");
+    process.exit(0);
+  });
+  process.stdin.on("close", () => {
+    log("stdin closed, exiting");
+    process.exit(0);
+  });
+
+  // Exit on signals
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(sig, () => {
+      log(`Received ${sig}, exiting`);
+      process.exit(0);
+    });
+  }
+
+  // Start polling — flush old updates first
   let offset: number | undefined;
+
+  // Skip any messages that arrived before this session
+  const pending = await telegram.getUpdates(undefined, 100);
+  if (pending.length > 0) {
+    offset = pending[pending.length - 1].update_id + 1;
+    log(`Skipped ${pending.length} old update(s)`);
+  }
 
   const poll = async () => {
     while (true) {
@@ -100,7 +129,7 @@ async function main() {
 
           // Check access
           if (!access.isAllowed(userId)) {
-            const code = access.generatePairingCode(userId);
+            const code = access.generatePairingCode(userId, msg.chat.id);
             await telegram.sendMessage(
               msg.chat.id,
               [
