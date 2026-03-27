@@ -59,7 +59,7 @@ Open [@BotFather](https://t.me/BotFather) in Telegram, run `/newbot`, and save t
 ### 2. Install
 
 ```bash
-git clone https://github.com/terorex-web/CEO-agent-tools-channels.git
+git clone https://github.com/romanbelopolskiy/CEO-agent-tools-channels.git
 cd CEO-agent-tools-channels
 npm install
 npm run build
