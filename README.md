@@ -239,4 +239,4 @@ src/
 
 ## License
 
-MIT
+All rights reserved. Copyright Roman Belopolskiy / [4sell.ai](https://4sell.ai)
