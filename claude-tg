@@ -12,8 +12,7 @@ fi
 # Parse bot names from JSON
 BOT_NAMES=($(python3 -c "import json; print('\n'.join(json.load(open('$BOTS_FILE')).keys()))" 2>/dev/null))
 
-if [[ ${#BOT_NAMES[@]} -eq 0 ]]; then
-  echo "No bots configured. Let's add one."
+add_bot() {
   echo ""
   printf "Bot name (e.g. ceo, support): "
   read NEW_NAME
@@ -35,19 +34,28 @@ json.dump(d, open('$BOTS_FILE', 'w'), indent=2)
 "
   echo "Bot '$NEW_NAME' saved."
   SELECTED="$NEW_NAME"
-elif [[ ${#BOT_NAMES[@]} -eq 1 ]]; then
-  SELECTED="${BOT_NAMES[1]}"
-  echo "Using bot: $SELECTED"
+}
+
+if [[ ${#BOT_NAMES[@]} -eq 0 ]]; then
+  echo "No bots configured. Let's add one."
+  add_bot
 else
   echo "Available bots:"
   for i in {1..${#BOT_NAMES[@]}}; do
     echo "  $i) ${BOT_NAMES[$i]}"
   done
+  next=$((${#BOT_NAMES[@]} + 1))
+  echo "  $next) + Add new bot"
   echo ""
   printf "Select bot [1]: "
   read choice
   choice=${choice:-1}
-  SELECTED="${BOT_NAMES[$choice]}"
+
+  if [[ "$choice" -eq "$next" ]]; then
+    add_bot
+  else
+    SELECTED="${BOT_NAMES[$choice]}"
+  fi
 fi
 
 if [[ -z "$SELECTED" ]]; then

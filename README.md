@@ -20,6 +20,9 @@ The [official `telegram@claude-plugins-official`](https://github.com/anthropics/
 | Isolation | Shared state | Each agent has its own context |
 | Process cleanup | Zombie processes on crash | Auto-exit on stdin close / signals |
 | Pairing | Per-session | Per-bot persistent access lists |
+| Authorization | Pairing flow only | Pairing flow OR direct allowlist file (no interaction) |
+| Media support | Text only | Photos and documents (saved to `/tmp/`, path forwarded to agent) |
+| Agent creation | Manual | `skills/spawn-agent` — automated full setup |
 
 ## Why this exists
 
@@ -94,13 +97,37 @@ On subsequent runs:
 - **One bot** — auto-selects it
 - **Multiple bots** — shows a numbered picker
 
-### 5. Pair your Telegram account
+### 5. Authorize your Telegram account
+
+There are two ways to authorize yourself:
+
+**Option A — Interactive pairing (default)**
 
 1. Send any message to your bot in Telegram
 2. The bot replies with a 6-character pairing code
 3. In Claude Code, say: `pair code abc123`
 4. The bot sends a confirmation: "Bot authorized under name devops"
 5. Done — your messages now reach Claude Code
+
+**Option B — Direct allowlist (no pairing required)**
+
+Faster for multi-agent setups where you're creating many bots at once. Bypass the pairing flow by writing the access file directly:
+
+```bash
+cat > ~/.claude/telegram-access-{botname}.json << 'EOF'
+{
+  "policy": "allowlist",
+  "allowedUsers": [YOUR_TELEGRAM_USER_ID],
+  "pendingPairs": {}
+}
+EOF
+```
+
+Replace `{botname}` with your bot name from the registry (e.g. `devops`, `smm`) and `YOUR_TELEGRAM_USER_ID` with your Telegram user ID.
+
+**Finding your user ID:** send a message to [@userinfobot](https://t.me/userinfobot) — it replies with your ID.
+
+This file is read at startup. No restart needed if the agent isn't running yet — just create the file before launching.
 
 ## Bot registry
 
@@ -210,6 +237,31 @@ Manage access control.
 | `user_id` | number | User ID (for `unpair`) |
 | `policy` | string | `open` or `allowlist` (for `set-policy`) |
 
+## Media support
+
+The server handles incoming photos and documents — not just text.
+
+**Photos:**
+- Downloaded from Telegram and saved to `/tmp/tg-photo-{file_unique_id}.jpg`
+- The channel event includes the local file path and any caption
+
+**Documents:**
+- Downloaded to `/tmp/tg-doc-{file_unique_id}-{filename}`
+- The channel event includes path, filename, and MIME type
+
+Your agent receives the file path and can read/analyze it using Claude Code's `Read` tool.
+
+Example channel payload for a photo:
+```json
+{
+  "type": "telegram_message",
+  "chat_id": 186356295,
+  "text": "Here's the screenshot",
+  "photo_path": "/tmp/tg-photo-AgACAgI.jpg",
+  "caption": "Here's the screenshot"
+}
+```
+
 ## Access control
 
 By default, the server runs in `allowlist` mode — only paired users can send messages.
@@ -307,6 +359,36 @@ The MCP server automatically exits when:
 - `SIGINT`, `SIGTERM`, or `SIGHUP` signal is received
 
 This prevents zombie processes from accumulating after sessions end.
+
+## Skills
+
+The `skills/` directory contains reusable agent skill files.
+
+### spawn-agent
+
+**File:** `skills/spawn-agent/SKILL.md`
+
+A complete step-by-step skill for creating a new agent from scratch. Covers everything:
+
+1. Register bot token in `~/.claude/telegram-bots.json`
+2. Create `telegram-access-{name}.json` with direct allowlist (no pairing needed)
+3. Set up agent directory: `logs/`, `state/`, `.claude/skills/`
+4. Write `.claude/settings.json` with `bypassPermissions` and all tool permissions
+5. Generate a task-specific `CLAUDE.md`
+6. Create the MCP config at `/tmp/claude-tg-mcp.{name}.json`
+7. Start the tmux session
+8. Update the architecture doc in Obsidian
+9. Send a completion report to Telegram
+
+**Usage:** copy the skill file into your agent's `.claude/skills/` folder, or reference it when asking Claude Code to create a new agent:
+
+```
+Create a new agent called "hiring" — it should review incoming CVs, score them against our criteria, and reply with a structured verdict.
+```
+
+Claude will follow the skill and build everything automatically.
+
+---
 
 ## Architecture
 

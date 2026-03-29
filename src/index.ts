@@ -134,15 +134,65 @@ async function main() {
         for (const update of updates) {
           offset = update.update_id + 1;
 
-          if (!update.message?.text || !update.message.from) {
-            debug(`Skipping update ${update.update_id}: no text or no from`);
+          if (!update.message?.from) {
+            debug(`Skipping update ${update.update_id}: no from`);
             continue;
           }
 
+          // Accept text, photo, document messages; skip everything else
           const msg = update.message;
+          if (!msg.text && !msg.photo && !msg.document) {
+            debug(`Skipping update ${update.update_id}: not text/photo/document`);
+            continue;
+          }
+
           const userId = msg.from!.id;
-          const text = msg.text!;
-          debug(`Update ${update.update_id}: user=${userId} (@${msg.from!.username || msg.from!.first_name}) text="${text.substring(0, 50)}"`);
+
+          // Build text content including media info
+          let text = msg.text || msg.caption || "";
+
+          // Handle photo: download largest size, save to temp, prepend [photo] tag
+          if (msg.photo && msg.photo.length > 0) {
+            try {
+              const largest = msg.photo[msg.photo.length - 1];
+              const fileInfo = await telegram.getFile(largest.file_id);
+              const fileData = await telegram.downloadFile(fileInfo.file_path);
+              const ext = fileInfo.file_path.split(".").pop() || "jpg";
+              const tmpPath = `/tmp/tg-photo-${largest.file_unique_id}.${ext}`;
+              const fs = await import("node:fs/promises");
+              await fs.writeFile(tmpPath, fileData);
+              const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
+              text = `[photo saved to ${tmpPath}${caption}]${text ? "\n" + text : ""}`;
+              log(`Photo saved: ${tmpPath}`);
+            } catch (err) {
+              log(`Failed to download photo: ${err}`);
+              text = `[photo - download failed]${text ? "\n" + text : ""}`;
+            }
+          }
+
+          // Handle document
+          if (msg.document) {
+            try {
+              const doc = msg.document;
+              const fileInfo = await telegram.getFile(doc.file_id);
+              const fileData = await telegram.downloadFile(fileInfo.file_path);
+              const fileName = doc.file_name || `document.${doc.mime_type?.split("/")[1] || "bin"}`;
+              const tmpPath = `/tmp/tg-doc-${doc.file_unique_id}-${fileName}`;
+              const fs = await import("node:fs/promises");
+              await fs.writeFile(tmpPath, fileData);
+              const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
+              text = `[document: ${fileName} (${doc.mime_type || "unknown"}) saved to ${tmpPath}${caption}]${text ? "\n" + text : ""}`;
+              log(`Document saved: ${tmpPath}`);
+            } catch (err) {
+              log(`Failed to download document: ${err}`);
+              text = `[document: ${msg.document.file_name || "unknown"} - download failed]${text ? "\n" + text : ""}`;
+            }
+          }
+
+          // Patch msg.text so emitChannelMessage sends enriched content
+          (msg as unknown as Record<string, unknown>).text = text;
+
+          debug(`Update ${update.update_id}: user=${userId} (@${msg.from!.username || msg.from!.first_name}) text="${text.substring(0, 80)}"`);
 
           // Check if this is a permission response
           const permResult = permissions.tryMatch(text);
@@ -166,13 +216,7 @@ async function main() {
               log(`Pairing code "${code}" generated for user ${userId} (chat ${msg.chat.id})`);
               await telegram.sendMessage(
                 msg.chat.id,
-                [
-                  `🔑 You are not authorized.`,
-                  ``,
-                  `Your pairing code: \`${code}\``,
-                  ``,
-                  `Send this code to the Claude Code session to pair.`,
-                ].join("\n")
+                `\`pair code ${code}\``
               );
               debug(`Pairing message sent to chat ${msg.chat.id}`);
             } else {
