@@ -189,6 +189,11 @@ async function main() {
             }
           }
 
+          // Ensure text is never empty — Claude Code ignores empty channel messages
+          if (!text || text.trim() === "") {
+            text = "[message received - no text content]";
+          }
+
           // Patch msg.text so emitChannelMessage sends enriched content
           (msg as unknown as Record<string, unknown>).text = text;
 
@@ -251,8 +256,17 @@ async function main() {
 
 const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
 
+const LOG_FILE = process.env.MCP_LOG_FILE;
+
 export function log(message: string): void {
-  process.stderr.write(`[telegram-mcp] ${message}\n`);
+  const line = `[telegram-mcp] ${message}\n`;
+  process.stderr.write(line);
+  if (LOG_FILE) {
+    try {
+      const fs = require("node:fs");
+      fs.appendFileSync(LOG_FILE, new Date().toISOString() + " " + line);
+    } catch {}
+  }
 }
 
 export function debug(message: string): void {
