@@ -53,7 +53,7 @@ json.dump(d, open(path, 'w'), indent=2)
 cat > /Users/romanbelopolskiy/.claude/telegram-access-{BOT_NAME}.json << 'EOF'
 {
   "policy": "allowlist",
-  "allowedUsers": [186356295],
+  "allowedUsers": [YOUR_TELEGRAM_USER_ID],
   "pendingPairs": {}
 }
 EOF
@@ -253,7 +253,7 @@ tmux send-keys -t {NAME}:0 "cd /Users/romanbelopolskiy/agents/{NAME} && claude -
 ## Checklist (проверь перед тем как отчитаться)
 
 - [ ] Токен добавлен в `telegram-bots.json`
-- [ ] `telegram-access-{NAME}.json` создан (allowlist: 186356295)
+- [ ] `telegram-access-{NAME}.json` создан (allowlist: YOUR_TELEGRAM_USER_ID)
 - [ ] `~/agents/{NAME}/` создана со всеми папками (logs, state, .claude/skills)
 - [ ] `.claude/settings.json` — bypassPermissions, все разрешения
 - [ ] `CLAUDE.md` — написан под конкретную задачу агента

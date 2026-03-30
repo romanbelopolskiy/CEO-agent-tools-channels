@@ -349,9 +349,9 @@ All logs are written to **stderr** (MCP uses stdout for protocol messages). Clau
 [telegram-mcp] Bot connected: @cc_devopsbot (CC devops bot)
 [telegram-mcp] MCP server started on stdio
 [telegram-mcp] Polling started
-[telegram-mcp] Pairing code "abc123" generated for user 186356295 (chat 186356295)
-[access:debug] pair("abc123"): success, allowedUsers=[186356295]
-[telegram-mcp] Sending authorization confirmation to chat 186356295 for bot "devops"
+[telegram-mcp] Pairing code "abc123" generated for user 123456789 (chat 123456789)
+[access:debug] pair("abc123"): success, allowedUsers=[123456789]
+[telegram-mcp] Sending authorization confirmation to chat 123456789 for bot "devops"
 [channel:debug] Emitting channel notification: {"method":"notifications/claude/channel",...}
 ```
 
