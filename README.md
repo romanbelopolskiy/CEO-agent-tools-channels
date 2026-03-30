@@ -211,7 +211,8 @@ claude --dangerously-load-development-channels server:ceo-agent-tools-channels
 | `TELEGRAM_BOT_NAME` | no | `telegram` | Bot name — used to look up token in `~/.claude/telegram-bots.json` |
 | `TELEGRAM_POLL_INTERVAL` | no | `1000` | Polling interval in ms |
 | `TELEGRAM_ACCESS_LIST` | no | `~/.claude/telegram-access-{name}.json` | Path to the access control file |
-| `DEBUG` | no | `0` | Set to `1` to enable debug logging |
+| `DEBUG` | no | `0` | Set to `1` to enable debug logging to stderr |
+| `MCP_LOG_FILE` | no | — | Path to a file for persistent debug logging (e.g. `/tmp/mybot.log`) |
 
 \* Either `TELEGRAM_BOT_TOKEN` or a matching entry in `~/.claude/telegram-bots.json` is required.
 
@@ -243,24 +244,30 @@ The server handles incoming photos and documents — not just text.
 
 **Photos:**
 - Downloaded from Telegram and saved to `/tmp/tg-photo-{file_unique_id}.jpg`
-- The channel event includes the local file path and any caption
+- Channel event text becomes: `[photo saved to /tmp/tg-photo-<id>.jpg Caption: "..."]`
+- Agent reads the file via Claude Code's native `Read` tool (supports images natively)
 
-**Documents:**
+**Documents (any file type):**
 - Downloaded to `/tmp/tg-doc-{file_unique_id}-{filename}`
-- The channel event includes path, filename, and MIME type
+- Channel event text becomes: `[document: filename.ext (mime/type) saved to /tmp/tg-doc-<id>-filename Caption: "..."]`
+- Text files (`.txt`, `.md`, `.csv`, `.json`, `.yaml`, `.log`) — agent reads with `cat`
+- Images (`.jpg`, `.png`) sent as documents — agent reads with `Read` tool
 
-Your agent receives the file path and can read/analyze it using Claude Code's `Read` tool.
+**Empty messages (photo without caption):**
+- Previously ignored by Claude Code (empty `content` in channel event)
+- Now: fallback text `[message received - no text content]` ensures the message always reaches the agent
 
-Example channel payload for a photo:
-```json
-{
-  "type": "telegram_message",
-  "chat_id": 186356295,
-  "text": "Here's the screenshot",
-  "photo_path": "/tmp/tg-photo-AgACAgI.jpg",
-  "caption": "Here's the screenshot"
-}
+**Example channel content for a photo with caption:**
 ```
+[photo saved to /tmp/tg-photo-AgACAgI.jpg Caption: "Here's the screenshot"]
+```
+
+**Example channel content for a `.md` file:**
+```
+[document: report.md (text/markdown) saved to /tmp/tg-doc-XYZ123-report.md Caption: "Review this"]
+```
+
+Your agent parses the path from the message text and reads the file directly.
 
 ## Access control
 

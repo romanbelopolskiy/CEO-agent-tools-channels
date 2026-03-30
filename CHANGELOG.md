@@ -4,6 +4,31 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.2.0] — 2026-03-30
+
+### Fixed
+
+#### Photos without caption were silently ignored
+When a user sent a photo without a caption, the channel event had empty `content`. Claude Code discards channel messages with empty content, so the agent never received the photo.
+
+**Fix:** after photo/document processing, if `text` is still empty, a fallback `[message received - no text content]` is set — ensuring the channel message always reaches the agent.
+
+### Added
+
+#### Persistent debug log file (`MCP_LOG_FILE`)
+Set `MCP_LOG_FILE=/path/to/file.log` in the MCP server's env to write all log output to a file in addition to stderr. Useful for diagnosing delivery issues after the fact:
+```json
+{
+  "env": {
+    "TELEGRAM_BOT_NAME": "devops",
+    "DEBUG": "1",
+    "MCP_LOG_FILE": "/tmp/devops-mcp.log"
+  }
+}
+```
+
+---
+
 ## [Unreleased] — 2026-03-29
 
 ### Added
