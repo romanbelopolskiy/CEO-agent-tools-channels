@@ -213,6 +213,7 @@ claude --dangerously-load-development-channels server:ceo-agent-tools-channels
 | `TELEGRAM_ACCESS_LIST` | no | `~/.claude/telegram-access-{name}.json` | Path to the access control file |
 | `DEBUG` | no | `0` | Set to `1` to enable debug logging to stderr |
 | `MCP_LOG_FILE` | no | — | Path to a file for persistent debug logging (e.g. `/tmp/mybot.log`) |
+| `TELEGRAM_GROUP_POLICY` | no | `mention-only` | How to handle group chat messages: `open` \| `allowlist` \| `mention-only` |
 
 \* Either `TELEGRAM_BOT_TOKEN` or a matching entry in `~/.claude/telegram-bots.json` is required.
 
@@ -237,6 +238,46 @@ Manage access control.
 | `code` | string | Pairing code (for `pair`) |
 | `user_id` | number | User ID (for `unpair`) |
 | `policy` | string | `open` or `allowlist` (for `set-policy`) |
+
+## Group chat support
+
+Agents can be added to Telegram group chats and will respond based on the `TELEGRAM_GROUP_POLICY` setting.
+
+### Policies
+
+| Policy | Behavior |
+|--------|----------|
+| `mention-only` | Only respond when bot is `@mentioned` or the message is a reply to a bot message. **Default.** Ideal for finance, ops, or any shared team chat where the bot should stay quiet unless addressed. |
+| `allowlist` | Only respond to messages from users in the access list. Useful for bots where the group is shared but only admins should trigger it. |
+| `open` | Respond to all messages in the group, same as DM behavior. Use only for dedicated bot channels with no casual conversation. |
+
+### What agents receive
+
+When a message arrives from a group, Claude Code receives the full context via channel metadata:
+
+```
+chat_type       = "supergroup"
+chat_title      = "Finance Team"
+is_group        = "true"
+bot_mentioned   = "true"      ← bot was @mentioned
+is_reply_to_bot = "false"
+```
+
+This lets agents make their own filtering decisions in `CLAUDE.md` on top of the MCP-level policy.
+
+### Bot mention detection
+
+Mention is detected via:
+- `@botusername` appearing in text (case-insensitive)
+- Telegram `mention` entity pointing to the bot
+- `text_mention` entity (for bots without usernames)
+- Message is a reply to a previous bot message
+
+The `@mention` is automatically stripped from the message text before forwarding to Claude — so the agent sees a clean command without the `@botname` prefix.
+
+### Access control in groups
+
+By default (`mention-only`), no pairing is required — anyone who mentions the bot will get a response. If you need per-user access control in groups, switch to `allowlist` policy and pair users as usual.
 
 ## Media support
 

@@ -34,6 +34,14 @@ export interface TelegramDocument {
   file_size?: number;
 }
 
+export interface TelegramMessageEntity {
+  type: string;
+  offset: number;
+  length: number;
+  url?: string;
+  user?: TelegramUser;
+}
+
 export interface TelegramMessage {
   message_id: number;
   from?: TelegramUser;
@@ -44,6 +52,8 @@ export interface TelegramMessage {
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
   reply_to_message?: TelegramMessage;
+  entities?: TelegramMessageEntity[];
+  caption_entities?: TelegramMessageEntity[];
 }
 
 export interface TelegramUpdate {

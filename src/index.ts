@@ -24,6 +24,9 @@ async function main() {
   const me = await telegram.getMe();
   log(`Bot connected: @${me.username} (${me.first_name})`);
   debug(`Bot ID: ${me.id}, is_bot: ${me.is_bot}`);
+  log(`Group policy: ${config.groupPolicy}`);
+
+  const botUsername = me.username?.toLowerCase() || "";
 
   // Create MCP server
   const server = new Server(
@@ -147,6 +150,118 @@ async function main() {
           }
 
           const userId = msg.from!.id;
+          const chatType = msg.chat.type || "private";
+          const isGroup = ["group", "supergroup", "channel"].includes(chatType);
+
+          // --- Group policy check ---
+          if (isGroup) {
+            const msgText = (msg.text || msg.caption || "").toLowerCase();
+            const entities = msg.entities || msg.caption_entities || [];
+
+            // Detect bot mention via @username in text
+            const mentionedInText = botUsername
+              ? msgText.includes(`@${botUsername}`)
+              : false;
+
+            // Detect bot mention via mention entity (works for private/public bots)
+            const mentionedViaEntity = entities.some((e) => {
+              if (e.type === "mention") {
+                const slice = (msg.text || msg.caption || "").substring(e.offset, e.offset + e.length).toLowerCase();
+                return slice === `@${botUsername}`;
+              }
+              if (e.type === "text_mention" && e.user) {
+                return e.user.id === me.id;
+              }
+              return false;
+            });
+
+            const botMentioned = mentionedInText || mentionedViaEntity;
+
+            // Detect reply to bot message
+            const isReplyToBot = !!(
+              msg.reply_to_message?.from?.id === me.id
+            );
+
+            if (config.groupPolicy === "mention-only" && !botMentioned && !isReplyToBot) {
+              debug(`Skipping group message (mention-only policy, bot not mentioned): chat=${msg.chat.id}`);
+              continue;
+            }
+
+            if (config.groupPolicy === "allowlist" && !access.isAllowed(userId)) {
+              debug(`Skipping group message (allowlist policy, user ${userId} not allowed)`);
+              continue;
+            }
+            // "open" policy: fall through to normal processing
+
+            // Build text content including media info
+            let text = msg.text || msg.caption || "";
+
+            // Strip bot mention from text so agent sees clean command
+            if (botUsername && text.toLowerCase().includes(`@${botUsername}`)) {
+              text = text.replace(new RegExp(`@${botUsername}`, "gi"), "").trim();
+            }
+
+            // Handle photo
+            if (msg.photo && msg.photo.length > 0) {
+              try {
+                const largest = msg.photo[msg.photo.length - 1];
+                const fileInfo = await telegram.getFile(largest.file_id);
+                const fileData = await telegram.downloadFile(fileInfo.file_path);
+                const ext = fileInfo.file_path.split(".").pop() || "jpg";
+                const tmpPath = `/tmp/tg-photo-${largest.file_unique_id}.${ext}`;
+                const fs = await import("node:fs/promises");
+                await fs.writeFile(tmpPath, fileData);
+                const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
+                text = `[photo saved to ${tmpPath}${caption}]${text ? "\n" + text : ""}`;
+                log(`Photo saved: ${tmpPath}`);
+              } catch (err) {
+                log(`Failed to download photo: ${err}`);
+                text = `[photo - download failed]${text ? "\n" + text : ""}`;
+              }
+            }
+
+            // Handle document
+            if (msg.document) {
+              try {
+                const doc = msg.document;
+                const fileInfo = await telegram.getFile(doc.file_id);
+                const fileData = await telegram.downloadFile(fileInfo.file_path);
+                const fileName = doc.file_name || `document.${doc.mime_type?.split("/")[1] || "bin"}`;
+                const tmpPath = `/tmp/tg-doc-${doc.file_unique_id}-${fileName}`;
+                const fs = await import("node:fs/promises");
+                await fs.writeFile(tmpPath, fileData);
+                const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
+                text = `[document: ${fileName} (${doc.mime_type || "unknown"}) saved to ${tmpPath}${caption}]${text ? "\n" + text : ""}`;
+                log(`Document saved: ${tmpPath}`);
+              } catch (err) {
+                log(`Failed to download document: ${err}`);
+                text = `[document: ${msg.document.file_name || "unknown"} - download failed]${text ? "\n" + text : ""}`;
+              }
+            }
+
+            if (!text || text.trim() === "") {
+              text = "[message received - no text content]";
+            }
+
+            (msg as unknown as Record<string, unknown>).text = text;
+
+            debug(`Group message: user=${userId} (@${msg.from!.username || msg.from!.first_name}) mentioned=${botMentioned} reply=${isReplyToBot} text="${text.substring(0, 80)}"`);
+
+            // Check permission response (even in groups)
+            const permResult = permissions.tryMatch(text);
+            if (permResult) {
+              emitPermissionResponse(server, permResult.requestId, permResult.approved);
+              const emoji = permResult.approved ? "✅" : "❌";
+              await telegram.sendMessage(msg.chat.id, `${emoji} Permission ${permResult.approved ? "granted" : "denied"}.`);
+              continue;
+            }
+
+            log(`Group message from @${msg.from!.username || msg.from!.first_name} in "${msg.chat.title || msg.chat.id}": ${text.substring(0, 50)}...`);
+            emitChannelMessage(server, config.botName, msg, botMentioned, isReplyToBot);
+            continue;
+          }
+
+          // --- Private chat (DM) logic below ---
 
           // Build text content including media info
           let text = msg.text || msg.caption || "";
@@ -236,9 +351,9 @@ async function main() {
 
           // Emit to Claude Code
           log(
-            `Message from @${msg.from!.username || msg.from!.first_name}: ${text.substring(0, 50)}...`
+            `DM from @${msg.from!.username || msg.from!.first_name}: ${text.substring(0, 50)}...`
           );
-          emitChannelMessage(server, config.botName, msg);
+          emitChannelMessage(server, config.botName, msg, false, false);
         }
       } catch (err) {
         log(`Polling error: ${err}`);

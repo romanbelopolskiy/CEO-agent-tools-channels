@@ -4,6 +4,43 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.3.0] — 2026-03-31
+
+### Added
+
+#### Group chat support
+
+Agents can now be added to Telegram groups with proper mention-awareness.
+
+**`TELEGRAM_GROUP_POLICY` env var** controls group behavior:
+
+| Value | Behavior |
+|-------|----------|
+| `mention-only` | Only respond when `@mentioned` or replied to (default) |
+| `allowlist` | Only respond to users in the access list |
+| `open` | Respond to all messages (like DM behavior) |
+
+**Rich group metadata** is now included in every channel notification:
+- `chat_type` — `"private"` \| `"group"` \| `"supergroup"` \| `"channel"`
+- `chat_title` — group name
+- `is_group` — `"true"` for group chats
+- `bot_mentioned` — `"true"` when bot was `@mentioned` in the message
+- `is_reply_to_bot` — `"true"` when message is a reply to the bot
+
+This metadata is available to agents via `CLAUDE.md` channel event context and can be used for agent-level filtering.
+
+**Mention detection** works via:
+- `@botusername` in message text (case-insensitive)
+- Telegram `mention` entity
+- `text_mention` entity (bots without usernames)
+- Reply to previous bot message
+
+**Auto-strip mention:** `@botusername` is automatically removed from message text before forwarding — agent sees the clean command.
+
+**`message_id`** is now included in channel metadata for potential future reply-to-message support.
+
+---
+
 ## [1.2.0] — 2026-03-30
 
 ### Fixed

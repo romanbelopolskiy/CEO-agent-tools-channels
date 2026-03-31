@@ -5,11 +5,14 @@ import { homedir } from "node:os";
 const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
 function debug(msg: string) { if (DEBUG) process.stderr.write(`[config:debug] ${msg}\n`); }
 
+export type GroupPolicy = "open" | "allowlist" | "mention-only";
+
 export interface Config {
   botToken: string;
   botName: string;
   pollInterval: number;
   accessListPath: string;
+  groupPolicy: GroupPolicy;
 }
 
 interface BotsRegistry {
@@ -75,10 +78,21 @@ export function loadConfig(): Config {
       || resolve(homedir(), ".claude", `telegram-access-${botName}.json`);
   }
 
+  // Group policy: how to handle messages in group chats
+  // "open"         — allow all group messages (like DM behavior)
+  // "allowlist"    — only allow messages from users in the access list
+  // "mention-only" — only respond when bot is @mentioned or replied to (default for groups)
+  const rawPolicy = process.env.TELEGRAM_GROUP_POLICY || "mention-only";
+  const groupPolicy: GroupPolicy = ["open", "allowlist", "mention-only"].includes(rawPolicy)
+    ? rawPolicy as GroupPolicy
+    : "mention-only";
+  debug(`TELEGRAM_GROUP_POLICY="${groupPolicy}"`);
+
   return {
     botToken,
     botName,
     pollInterval,
     accessListPath,
+    groupPolicy,
   };
 }
