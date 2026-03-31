@@ -187,8 +187,8 @@ async function main() {
               continue;
             }
 
-            if (config.groupPolicy === "allowlist" && !access.isAllowed(userId)) {
-              debug(`Skipping group message (allowlist policy, user ${userId} not allowed)`);
+            if (config.groupPolicy === "allowlist" && !access.isAllowed(userId, msg.chat.id)) {
+              debug(`Skipping group message (allowlist policy, user ${userId} / chat ${msg.chat.id} not allowed)`);
               continue;
             }
             // "open" policy: fall through to normal processing
@@ -327,8 +327,8 @@ async function main() {
           }
 
           // Check access
-          if (!access.isAllowed(userId)) {
-            debug(`User ${userId} not in allowlist`);
+          if (!access.isAllowed(userId, msg.chat.id)) {
+            debug(`User ${userId} / chat ${msg.chat.id} not in allowlist`);
             // Only send pairing message once per user per session
             if (!pairingNotified.has(userId)) {
               pairingNotified.add(userId);
