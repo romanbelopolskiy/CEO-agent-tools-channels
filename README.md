@@ -207,15 +207,24 @@ claude --dangerously-load-development-channels server:ceo-agent-tools-channels
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | no* | — | Bot token from @BotFather |
-| `TELEGRAM_BOT_NAME` | no | `telegram` | Bot name — used to look up token in `~/.claude/telegram-bots.json` |
+| `TELEGRAM_BOT_NAME` | **yes** | — | Bot name to load from `~/.claude/telegram-bots.json`. **Only this bot will be started** — ensures strict per-agent routing. |
 | `TELEGRAM_POLL_INTERVAL` | no | `1000` | Polling interval in ms |
 | `TELEGRAM_ACCESS_LIST` | no | `~/.claude/telegram-access-{name}.json` | Path to the access control file |
 | `DEBUG` | no | `0` | Set to `1` to enable debug logging to stderr |
 | `MCP_LOG_FILE` | no | — | Path to a file for persistent debug logging (e.g. `/tmp/mybot.log`) |
 | `TELEGRAM_GROUP_POLICY` | no | `mention-only` | How to handle group chat messages: `open` \| `allowlist` \| `mention-only` |
 
-\* Either `TELEGRAM_BOT_TOKEN` or a matching entry in `~/.claude/telegram-bots.json` is required.
+### Bot routing (important)
+
+When `TELEGRAM_BOT_NAME` is set, **only that bot is loaded** — the MCP server starts a single Telegram poller for that bot only. This prevents the "all agents receive all messages" problem when running multiple agents in parallel.
+
+`claude-tg` sets `TELEGRAM_BOT_NAME` automatically based on your selection. If launching manually, always pass it explicitly:
+
+```json
+"env": { "TELEGRAM_BOT_NAME": "devops" }
+```
+
+If `TELEGRAM_BOT_NAME` is **not** set (legacy mode), all bots in the registry are loaded simultaneously. This is not recommended for multi-agent setups.
 
 ## Tools
 

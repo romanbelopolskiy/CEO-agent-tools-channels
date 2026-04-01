@@ -7,11 +7,15 @@ function debug(msg: string) { if (DEBUG) process.stderr.write(`[config:debug] ${
 
 export type GroupPolicy = "open" | "allowlist" | "mention-only";
 
-export interface Config {
-  botToken: string;
-  botName: string;
-  pollInterval: number;
+export interface BotEntry {
+  name: string;
+  token: string;
   accessListPath: string;
+}
+
+export interface Config {
+  bots: BotEntry[];
+  pollInterval: number;
   groupPolicy: GroupPolicy;
 }
 
@@ -35,64 +39,48 @@ function loadBotsRegistry(): BotsRegistry {
 }
 
 export function loadConfig(): Config {
-  const botName = process.env.TELEGRAM_BOT_NAME || "telegram";
-  debug(`TELEGRAM_BOT_NAME="${botName}"`);
-  debug(`TELEGRAM_BOT_TOKEN=${process.env.TELEGRAM_BOT_TOKEN ? "set" : "not set"}`);
-  let botToken = process.env.TELEGRAM_BOT_TOKEN;
+  const registry = loadBotsRegistry();
+  let botNames = Object.keys(registry);
+  debug(`Registry bots: ${JSON.stringify(botNames)}`);
 
-  // If no token in env, look up by name in ~/.claude/telegram-bots.json
-  if (!botToken) {
-    const registry = loadBotsRegistry();
-    debug(`Registry bots: ${JSON.stringify(Object.keys(registry))}`);
-    const entry = registry[botName];
-    if (entry?.token) {
-      botToken = entry.token;
-      debug(`Token found in registry for "${botName}"`);
-    } else {
-      debug(`No token in registry for "${botName}"`);
+  // If TELEGRAM_BOT_NAME is set, only load that specific bot (routing by bot name)
+  const envBotName = process.env.TELEGRAM_BOT_NAME;
+  if (envBotName) {
+    if (!registry[envBotName]) {
+      throw new Error(`Bot "${envBotName}" not found in registry. Available: ${botNames.join(", ")}`);
     }
+    botNames = [envBotName];
+    debug(`TELEGRAM_BOT_NAME="${envBotName}" — loading only this bot`);
   }
 
-  if (!botToken) {
+  if (botNames.length === 0) {
     const registryPath = resolve(homedir(), ".claude", "telegram-bots.json");
     throw new Error(
-      `No token for bot "${botName}".\n` +
-      `Either set TELEGRAM_BOT_TOKEN env var, or add it to ${registryPath}:\n` +
-      `{\n  "${botName}": { "token": "123456:ABC..." }\n}`
+      `No bots found in ${registryPath}.\n` +
+      `Add at least one bot:\n` +
+      `{\n  "mybot": { "token": "123456:ABC..." }\n}`
     );
   }
 
-  const pollInterval = parseInt(
-    process.env.TELEGRAM_POLL_INTERVAL || "1000",
-    10
-  );
+  const bots: BotEntry[] = botNames.map((name) => {
+    const entry = registry[name];
+    return {
+      name,
+      token: entry.token,
+      accessListPath: entry.accessList || resolve(homedir(), ".claude", `telegram-access-${name}.json`),
+    };
+  });
+
+  const pollInterval = parseInt(process.env.TELEGRAM_POLL_INTERVAL || "1000", 10);
   if (isNaN(pollInterval) || pollInterval < 100) {
     throw new Error("TELEGRAM_POLL_INTERVAL must be a number >= 100 (ms)");
   }
 
-  // Access list: env > registry > default
-  let accessListPath = process.env.TELEGRAM_ACCESS_LIST;
-  if (!accessListPath) {
-    const registry = loadBotsRegistry();
-    accessListPath = registry[botName]?.accessList
-      || resolve(homedir(), ".claude", `telegram-access-${botName}.json`);
-  }
-
-  // Group policy: how to handle messages in group chats
-  // "open"         — allow all group messages (like DM behavior)
-  // "allowlist"    — only allow messages from users in the access list
-  // "mention-only" — only respond when bot is @mentioned or replied to (default for groups)
   const rawPolicy = process.env.TELEGRAM_GROUP_POLICY || "mention-only";
   const groupPolicy: GroupPolicy = ["open", "allowlist", "mention-only"].includes(rawPolicy)
     ? rawPolicy as GroupPolicy
     : "mention-only";
   debug(`TELEGRAM_GROUP_POLICY="${groupPolicy}"`);
 
-  return {
-    botToken,
-    botName,
-    pollInterval,
-    accessListPath,
-    groupPolicy,
-  };
+  return { bots, pollInterval, groupPolicy };
 }
