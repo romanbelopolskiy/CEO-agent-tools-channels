@@ -118,8 +118,8 @@ export function renderStatus(
 
     case "tool_started":
       return (
-        `🔧 Вызываю tool\n\n${agent}\nШаг: MCP/tool call` +
-        (event.tool ? `\nTool: \`${event.tool}\`` : "")
+        `🔧 Tool: \`${event.tool || "unknown"}\`\n\n${agent}` +
+        (event.preview ? `\n${truncate(event.preview, 300)}` : "")
       );
 
     case "tool_finished":
@@ -287,6 +287,18 @@ export class StatusManager {
       if (s.chatId === chatId && !s.finishedAt) return s;
     }
     return undefined;
+  }
+
+  /** Find the most recent active task across all chats.
+   *  Used when a tool call doesn't carry chat_id in its args. */
+  findMostRecentActiveTask(): TaskStatusState | undefined {
+    let best: TaskStatusState | undefined;
+    for (const [, s] of this.tasks) {
+      if (!s.finishedAt && (!best || s.startedAt > best.startedAt)) {
+        best = s;
+      }
+    }
+    return best;
   }
 
   /** Clean old finished tasks (>10 min) to avoid memory leak. */

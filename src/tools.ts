@@ -96,16 +96,38 @@ export function registerTools(
     const { name, arguments: args } = request.params;
     log(`Tool called: ${name}(${JSON.stringify(args)})`);
 
-    // Emit tool_started status for any tool call (not just send_telegram_message).
-    const toolChatId = args?.chat_id as number | undefined;
-    const toolBotName = args?.bot_name as string | undefined;
-    if (statusManager && toolChatId) {
-      const task = statusManager.findTaskByChatId(toolChatId);
+    // Emit detailed tool_started status for EVERY tool call.
+    // Try chat_id from args first; fall back to most recent active task.
+    if (statusManager) {
+      const toolChatId = args?.chat_id as number | undefined;
+      let task = toolChatId
+        ? statusManager.findTaskByChatId(toolChatId)
+        : statusManager.findMostRecentActiveTask();
+
       if (task) {
+        // Build a human-readable preview of what this tool does.
+        let preview = "";
+        if (name === "send_telegram_message") {
+          const t = (args?.text as string) || "";
+          preview = t.length > 80 ? t.slice(0, 80) + "…" : t;
+        } else if (args) {
+          // Show key args: command, file_path, pattern, query, url, object, etc.
+          const interesting = ["command", "file_path", "pattern", "query", "url",
+            "object", "skill", "prompt", "description", "old_string", "content"];
+          for (const key of interesting) {
+            if (args[key]) {
+              const val = String(args[key]);
+              preview = `${key}: ${val.length > 100 ? val.slice(0, 100) + "…" : val}`;
+              break;
+            }
+          }
+        }
+
         statusManager.emitEvent({
           type: "tool_started",
           taskId: task.taskId,
           tool: name,
+          preview,
         });
       }
     }
