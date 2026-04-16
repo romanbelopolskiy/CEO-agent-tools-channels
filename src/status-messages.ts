@@ -223,11 +223,12 @@ export class StatusManager {
     this.emitEvent({ type: "task_failed", taskId, error });
   }
 
-  /** Find an active (non-finished) task by chatId, most recent first. */
-  findTaskByChatId(chatId: number): TaskStatusState | undefined {
+  /** Find an active (non-finished) task by chatId and botName, most recent first. */
+  findTaskByChatId(chatId: number, botName: string): TaskStatusState | undefined {
     let best: TaskStatusState | undefined;
     for (const [, s] of this.tasks) {
       if (s.chatId !== chatId) continue;
+      if (s.botName !== botName) continue;
       if (s.finishedAt) continue;
       if (!best || s.startedAt > best.startedAt) best = s;
     }

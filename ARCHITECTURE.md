@@ -208,7 +208,7 @@ Three tools exposed to Claude Code agents:
   - `startTask(opts)` → sends initial "⏳ Задача принята" message, stores `statusMessageId`.
   - `emitEvent(event)` → debounced `editMessageText` with rendered status.
   - `finishTask(taskId)` / `failTask(taskId, error)` → immediate final edit.
-  - `findTaskByChatId(chatId)` → returns the **most-recent** active task for that chat (highest `startedAt`). Previously returned the first/oldest active task, which caused status updates after `/stop` to target the old interrupted task instead of the new one.
+  - `findTaskByChatId(chatId, botName)` → returns the **most-recent** active task for that chat scoped to the given bot (highest `startedAt`). Scoping by `botName` prevents cross-bot status leaks when the same user has tasks running in multiple bots simultaneously.
   - `findMostRecentActiveTask()` → fallback for tool calls that don't carry `chat_id`.
   - `gc()` → cleanup finished tasks older than 10 min.
 

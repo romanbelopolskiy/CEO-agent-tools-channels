@@ -496,6 +496,7 @@ Set `DEBUG=0` or remove the `DEBUG` env var. Non-debug logs (`[telegram-mcp]`) a
 | `/stop` fails with ENOENT on launchd | launchd PATH does not include Homebrew. Add `/opt/homebrew/bin` to `EnvironmentVariables` in your plist (see Setup, step 5). |
 | Status message flickers every second while agent is thinking | Upgrade to v3.1.0 — `render-tui.py` now normalizes the progress counter so the hash stays stable between ticks. |
 | Status updates go to an old message after `/stop` and a new task | Upgrade to v3.1.0 — `StatusManager.findTaskByChatId` now returns the most-recent active task instead of the oldest. |
+| Status updates from bot A appear in bot B's chat (cross-bot leak) | Upgrade to v3.1.1 — `findTaskByChatId` now filters by `botName` in addition to `chatId`. |
 | Agent can't connect | SSE server not running. Run `curl http://127.0.0.1:3200/health`. If down, restart. |
 | Messages not arriving | Wrong bot name in `.mcp.json` or polling error. Check stderr logs for `[botname] Polling error`. |
 | "typing..." indicator stuck | Will auto-stop after 2 min. Or restart server. With v3.1.0, `/stop` also calls `stopTyping` immediately. |

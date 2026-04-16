@@ -154,7 +154,7 @@ function tryHandleStop(botName: string, chatId: number, text: string): string | 
     log(`[${botName}] ESC sent via tmux send-keys`);
     // Finalize the active task for this chat so the next user message gets a fresh status message
     if (statusManager) {
-      const task = statusManager.findTaskByChatId(chatId);
+      const task = statusManager.findTaskByChatId(chatId, botName);
       if (task) {
         statusManager.finishTask(task.taskId);
         log(`[${botName}] finalized task ${task.taskId} on stop`);
@@ -352,8 +352,8 @@ async function startSseServer(
           chatId?: number;
           text?: string;
         };
-        if (statusManager && data.chatId && data.text) {
-          const task = statusManager.findTaskByChatId(data.chatId);
+        if (statusManager && data.chatId && data.text && data.botName) {
+          const task = statusManager.findTaskByChatId(data.chatId, data.botName);
           if (task) {
             statusManager.emitEvent({
               type: "thinking_updated",

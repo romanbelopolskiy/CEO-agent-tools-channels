@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ---
 
+## [3.1.1] — 2026-04-16
+
+### Fixed
+
+- **Cross-bot status leak via `findTaskByChatId`** — when the same user (`chat_id`) had active tasks in multiple bots simultaneously, `/status-feed` updates from bot A could land on a task belonging to bot B (whichever had the most-recent `startedAt`). Fixed by adding a `botName` parameter to `findTaskByChatId(chatId, botName)` so lookups are scoped to the correct bot. All four call sites updated: `/status-feed` handler, `tryHandleStop`, `send_telegram_message` finalizer, and the tool-started emitter in `tools.ts`. (`src/status-messages.ts`, `src/index.ts`, `src/tools.ts`)
+
+---
+
 ## [3.1.0] — 2026-04-16
 
 ### Added

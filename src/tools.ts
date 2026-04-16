@@ -97,11 +97,12 @@ export function registerTools(
     log(`Tool called: ${name}(${JSON.stringify(args)})`);
 
     // Emit detailed tool_started status for EVERY tool call.
-    // Try chat_id from args first; fall back to most recent active task.
+    // Try chat_id + bot_name from args first; fall back to most recent active task.
     if (statusManager) {
       const toolChatId = args?.chat_id as number | undefined;
-      let task = toolChatId
-        ? statusManager.findTaskByChatId(toolChatId)
+      const toolBotName = args?.bot_name as string | undefined;
+      let task = (toolChatId && toolBotName)
+        ? statusManager.findTaskByChatId(toolChatId, toolBotName)
         : statusManager.findMostRecentActiveTask();
 
       if (task) {
@@ -177,7 +178,7 @@ export function registerTools(
 
           // Finalize live status — agent has replied.
           if (statusManager) {
-            const task = statusManager.findTaskByChatId(chatId);
+            const task = statusManager.findTaskByChatId(chatId, botName);
             if (task) {
               statusManager.finishTask(task.taskId);
             }
