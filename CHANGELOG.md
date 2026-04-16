@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ---
 
+## [3.1.2] — 2026-04-17
+
+### Fixed
+
+- **Status streaming resumes automatically after intermediate replies** — agents often send mid-turn messages ("Принято…", "Запускаю субагентов", etc.) via `send_telegram_message`, which finalizes the live status task. Subsequent `status-watcher.sh` POSTs to `/status-feed` found no active task (because `findTaskByChatId` correctly skips finalized tasks) and were silently dropped, causing streaming to stop for the rest of the turn. Fixed: the `/status-feed` POST handler now auto-creates a new task on the fly whenever no active task exists for the `(chatId, botName)` pair, immediately spawning a fresh Telegram status message and resuming streaming. This was a latent bug first exposed by the v3.1.1 `botName`-scoped lookup that removed the cross-bot leak which had accidentally masked it. (`src/index.ts`)
+
+---
+
 ## [3.1.1] — 2026-04-16
 
 ### Fixed

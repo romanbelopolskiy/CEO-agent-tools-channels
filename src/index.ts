@@ -353,7 +353,21 @@ async function startSseServer(
           text?: string;
         };
         if (statusManager && data.chatId && data.text && data.botName) {
-          const task = statusManager.findTaskByChatId(data.chatId, data.botName);
+          let task = statusManager.findTaskByChatId(data.chatId, data.botName);
+          if (!task) {
+            // No active task for this (chatId, botName) — the previous task was
+            // finalized by send_telegram_message (intermediate reply) or /stop.
+            // Auto-create a new task so streaming resumes with a fresh status message.
+            const taskId = `${data.botName}:${data.chatId}:stream-${Date.now()}`;
+            await statusManager.startTask({
+              taskId,
+              botName: data.botName,
+              chatId: data.chatId,
+              sourceMessageId: 0,
+              mode: telemetryMode,
+            }).catch((err) => log(`status auto-create error: ${err}`));
+            task = statusManager.findTaskByChatId(data.chatId, data.botName);
+          }
           if (task) {
             statusManager.emitEvent({
               type: "thinking_updated",

@@ -266,7 +266,12 @@ Emits `claude/channel` and `claude/channel/permission` notifications to the MCP 
 8. Agent calls send_telegram_message(bot, chat, "Deployed!")
    ├─ telegram.sendMessage() → agent's reply appears in chat
    ├─ stopTyping()
-   └─ statusManager.finishTask() → edits status to "✅ Готово"
+   └─ statusManager.finishTask() → marks task finalized (finishedAt set)
+
+9. If agent continues working (subagents, more tools) after the reply:
+   └─ status-watcher.sh POSTs to /status-feed → no active task found →
+      /status-feed auto-creates a new task (v3.1.2) → fresh status message
+      appears in Telegram and streaming resumes automatically.
 ```
 
 ## How to extend
