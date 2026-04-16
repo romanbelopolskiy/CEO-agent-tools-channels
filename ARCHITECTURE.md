@@ -272,6 +272,8 @@ Emits `claude/channel` and `claude/channel/permission` notifications to the MCP 
    └─ status-watcher.sh POSTs to /status-feed → no active task found →
       /status-feed auto-creates a new task (v3.1.2) → fresh status message
       appears in Telegram and streaming resumes automatically.
+      Note (v3.1.3): auto-create is skipped if the last task finished within
+      10s (STATUS_AUTOCREATE_COOLDOWN_MS) to suppress TUI-flush phantom messages.
 ```
 
 ## How to extend

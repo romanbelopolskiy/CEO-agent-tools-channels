@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ---
 
+## v3.1.3 — 2026-04-16
+
+### Fixed
+
+- **No more phantom status messages after the agent replies** — brief cooldown suppresses the TUI flush tail. When the most-recently-finished task for a `(chatId, botName)` pair ended within the last 10 seconds, `/status-feed` skips auto-creating a new task. This kills the spurious post-reply status message caused by the TUI flushing its final frame ~1s after `finishTask`, while preserving the intermediate-reply resume flow (which kicks in once the cooldown expires). (`src/status-messages.ts`, `src/index.ts`, `src/constants.ts`)
+
+---
+
 ## [3.1.2] — 2026-04-17
 
 ### Fixed
