@@ -184,4 +184,50 @@ EOF
 fi
 
 echo "Starting Claude Code with bot: $CLI_BOT (SSE: $SSE_HOST, model: $CLI_MODEL, effort: $CLI_EFFORT)"
-claude --dangerously-load-development-channels server:ceo-agent-tools-channels --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}"
+
+# --- Live status: capture CLI output and stream to Telegram ---
+# Reads telegramTelemetry from .claude-tg.json (silent = no watcher).
+TELEMETRY_MODE="status"
+if [[ -f "$AGENT_DEFAULTS_PATH" ]]; then
+  TELEMETRY_MODE=$(python3 -c "
+import json
+try:
+    d=json.load(open('$AGENT_DEFAULTS_PATH'))
+    print(d.get('telegramTelemetry','status'))
+except: print('status')
+" 2>/dev/null)
+fi
+
+# Get the chat_id for this bot from the access list (first allowed user).
+WATCHER_CHAT_ID=""
+ACCESS_FILE="$HOME/.claude/telegram-access-${CLI_BOT}.json"
+if [[ -f "$ACCESS_FILE" ]]; then
+  WATCHER_CHAT_ID=$(python3 -c "
+import json
+try:
+    d=json.load(open('$ACCESS_FILE'))
+    users=d.get('allowedUsers',[]) or d.get('users',[])
+    if users: print(users[0])
+except: pass
+" 2>/dev/null)
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WATCHER_PID=""
+CLI_LOG="/tmp/claude-cli-$$.log"
+
+cleanup_watcher() {
+  [[ -n "$WATCHER_PID" ]] && kill "$WATCHER_PID" 2>/dev/null
+  rm -f "$CLI_LOG"
+}
+trap cleanup_watcher EXIT
+
+if [[ "$TELEMETRY_MODE" != "silent" && -n "$WATCHER_CHAT_ID" ]]; then
+  touch "$CLI_LOG"
+  "$SCRIPT_DIR/status-watcher.sh" "$CLI_LOG" "$CLI_BOT" "$WATCHER_CHAT_ID" "$SSE_HOST" &
+  WATCHER_PID=$!
+  echo "Live status watcher started (PID $WATCHER_PID, chat $WATCHER_CHAT_ID)"
+  script -q "$CLI_LOG" claude --dangerously-load-development-channels server:ceo-agent-tools-channels --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}"
+else
+  claude --dangerously-load-development-channels server:ceo-agent-tools-channels --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}"
+fi

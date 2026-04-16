@@ -309,6 +309,51 @@ async function startSseServer(
       return;
     }
 
+    // --- Live status feed from CLI wrapper (claude-tg pipes here) ---
+    if (req.method === "POST" && url.pathname === "/status-feed") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      try {
+        const data = JSON.parse(body) as {
+          botName?: string;
+          chatId?: number;
+          text?: string;
+        };
+        if (statusManager && data.chatId && data.text) {
+          const task = statusManager.findTaskByChatId(data.chatId);
+          if (task) {
+            statusManager.emitEvent({
+              type: "thinking_updated",
+              taskId: task.taskId,
+              text: data.text,
+            });
+            // Override rendered text with raw CLI output
+            const client = botsMap.get(task.botName)?.telegram;
+            if (client && task.statusMessageId) {
+              const trimmed = data.text.slice(-3500); // Telegram limit ~4096
+              if (trimmed !== task.lastRenderedText) {
+                try {
+                  await client.editMessageText(
+                    task.chatId,
+                    task.statusMessageId,
+                    `\`\`\`\n${trimmed}\n\`\`\``,
+                  );
+                  task.lastRenderedText = trimmed;
+                  task.lastRenderAt = Date.now();
+                } catch {}
+              }
+            }
+          }
+        }
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("ok");
+      } catch {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("bad json");
+      }
+      return;
+    }
+
     // --- Health check ---
     if (req.method === "GET" && url.pathname === "/health") {
       const info = {
