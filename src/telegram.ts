@@ -1,7 +1,6 @@
-const BASE_URL = "https://api.telegram.org";
+import { debug } from "./logger.js";
 
-const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
-function debug(msg: string) { if (DEBUG) process.stderr.write(`[telegram-api:debug] ${msg}\n`); }
+const BASE_URL = "https://api.telegram.org";
 
 export interface TelegramUser {
   id: number;

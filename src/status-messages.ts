@@ -13,14 +13,8 @@
  */
 
 import type { TelegramClient, TelegramMessage } from "./telegram.js";
-
-const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
-function debug(msg: string) {
-  if (DEBUG) process.stderr.write(`[status:debug] ${msg}\n`);
-}
-function log(msg: string) {
-  process.stderr.write(`[status] ${msg}\n`);
-}
+import { debug, log } from "./logger.js";
+import { STATUS_DEBOUNCE_MS, STATUS_GC_MAX_AGE_MS } from "./constants.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -199,7 +193,7 @@ function shouldShow(event: AgentRuntimeEvent, mode: VerbosityMode): boolean {
 // StatusManager
 // ---------------------------------------------------------------------------
 
-const DEBOUNCE_MS = 1000;
+const DEBOUNCE_MS = STATUS_DEBOUNCE_MS;
 const TERMINAL_EVENTS = new Set(["task_finished", "task_failed"]);
 
 export class StatusManager {
@@ -297,7 +291,7 @@ export class StatusManager {
 
   /** Clean old finished tasks (>10 min) to avoid memory leak. */
   gc(): void {
-    const cutoff = Date.now() - 10 * 60_000;
+    const cutoff = Date.now() - STATUS_GC_MAX_AGE_MS;
     for (const [id, s] of this.tasks) {
       if (s.finishedAt && s.finishedAt < cutoff) {
         this.tasks.delete(id);

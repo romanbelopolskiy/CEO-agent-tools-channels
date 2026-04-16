@@ -7,9 +7,7 @@ import type { TelegramClient } from "./telegram.js";
 import type { AccessControl } from "./access.js";
 import type { StatusManager } from "./status-messages.js";
 
-const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
-function debug(msg: string) { if (DEBUG) process.stderr.write(`[tools:debug] ${msg}\n`); }
-function log(msg: string) { process.stderr.write(`[telegram-mcp] ${msg}\n`); }
+import { debug, log } from "./logger.js";
 
 export interface BotContext {
   name: string;

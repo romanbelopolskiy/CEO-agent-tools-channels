@@ -13,6 +13,8 @@ import { PermissionManager } from "./permissions.js";
 import { emitChannelMessage, emitPermissionResponse } from "./channel.js";
 import { registerTools, type BotContext } from "./tools.js";
 import type { GroupPolicy } from "./config.js";
+import { log, debug } from "./logger.js";
+import { TYPING_INTERVAL_MS, TYPING_TIMEOUT_MS, DEFAULT_SSE_PORT, STATUS_GC_INTERVAL_MS } from "./constants.js";
 import { StatusManager, loadTelemetryConfig, type VerbosityMode } from "./status-messages.js";
 
 interface BotRuntime {
@@ -57,12 +59,12 @@ function startTyping(botsMap: Map<string, BotContext>, botName: string, chatId: 
 
   const interval = setInterval(() => {
     bot.telegram.sendChatAction(chatId, "typing").catch(() => {});
-  }, 4000);
+  }, TYPING_INTERVAL_MS);
 
   typingIntervals.set(key, interval);
 
   // Auto-stop after 2 minutes
-  setTimeout(() => stopTyping(botName, chatId), 120_000);
+  setTimeout(() => stopTyping(botName, chatId), TYPING_TIMEOUT_MS);
 }
 
 function stopTyping(botName: string, chatId: number) {
@@ -571,26 +573,7 @@ async function enrichMedia(
   return text;
 }
 
-// --- Logging ---
-const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
-const LOG_FILE = process.env.MCP_LOG_FILE;
-
-export function log(message: string): void {
-  const line = `[telegram-mcp] ${message}\n`;
-  process.stderr.write(line);
-  if (LOG_FILE) {
-    try {
-      const fs = require("node:fs");
-      fs.appendFileSync(LOG_FILE, new Date().toISOString() + " " + line);
-    } catch {}
-  }
-}
-
-export function debug(message: string): void {
-  if (DEBUG) {
-    process.stderr.write(`[telegram-mcp:debug] ${message}\n`);
-  }
-}
+// Logging is imported from logger.ts at the top of the file.
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -608,10 +591,10 @@ async function main() {
   statusManager = new StatusManager((botName) => botsMap.get(botName)?.telegram);
 
   // Periodic GC of old finished tasks.
-  setInterval(() => statusManager?.gc(), 60_000);
+  setInterval(() => statusManager?.gc(), STATUS_GC_INTERVAL_MS);
 
   const transport = process.env.TRANSPORT || (process.env.PORT ? "sse" : "stdio");
-  const port = parseInt(process.env.PORT || "3200");
+  const port = parseInt(process.env.PORT || String(DEFAULT_SSE_PORT));
 
   if (transport === "sse") {
     await startSseServer(port, runtimes, botsMap, config);
