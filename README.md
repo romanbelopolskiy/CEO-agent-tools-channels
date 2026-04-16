@@ -42,18 +42,22 @@ You (Telegram)
      └── @senior_dev_bot  ──►  Claude Code session #3  (CLAUDE.md: architecture + deploy)
 ```
 
-Under the hood:
+Under the hood (**SSE mode** — recommended):
 
 ```
-Telegram Bot API  ◄── long polling ──  MCP server (this project)  ◄── stdio ──►  Claude Code
-                  ── send_message ──►                              ── channel ──►
+                                                    ┌──  Claude Code session #1  (?bot=smm)
+Telegram Bot API  ◄── long polling ──  SSE Server  ─┼──  Claude Code session #2  (?bot=devops)
+                  ── send_message ──►  (port 3200)  └──  Claude Code session #3  (?bot=senior)
 ```
 
-1. Each agent runs as a separate Claude Code session with its own `CLAUDE.md`, `.mcp.json`, and `.claude/skills/`
-2. Each session connects to its own Telegram bot via this MCP server
-3. When you send a message in Telegram, it arrives as a channel event in Claude Code
-4. Claude processes it with its configured skills and replies back through Telegram
-5. Permission requests (tool approvals) are forwarded to Telegram — approve or deny right from your phone
+1. A **single shared SSE server** polls all Telegram bots and routes messages
+2. Each Claude Code session connects via SSE URL with `?bot=NAME` — receives only messages for its bot
+3. When you send a message in Telegram, it's routed to the correct agent session
+4. **Typing indicator** — Telegram shows "typing..." while the agent is processing your message
+5. Bots sharing the same token are polled once (no 409 Conflict errors)
+6. Permission requests (tool approvals) are forwarded to Telegram — approve or deny from your phone
+
+**Stdio mode** is still supported for single-bot setups (backward compatible).
 
 ## Quick start
 
@@ -70,32 +74,47 @@ npm install
 npm run build
 ```
 
-### 3. Add `claude-tg` to PATH
+### 3. Start the SSE server
 
 ```bash
-ln -sf "$(pwd)/claude-tg" /opt/homebrew/bin/claude-tg
+PORT=3200 TRANSPORT=sse node dist/index.js
 ```
 
-### 4. Launch
+Or install as a launchd service (macOS — auto-start + keepalive):
 
 ```bash
+cp examples/com.ceo-agent-tools.channels-sse.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
+```
+
+Verify: `curl http://127.0.0.1:3200/health`
+
+### 4. Configure your agent
+
+Add to your agent's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ceo-agent-tools-channels": {
+      "type": "sse",
+      "url": "http://127.0.0.1:3200/sse?bot=devops"
+    }
+  }
+}
+```
+
+### 5. Launch the agent
+
+```bash
+cd ~/agents/devops
 claude-tg
+# Auto-detects bot name from directory, connects to SSE server
 ```
 
-On first run with no bots configured, it will prompt you:
+Or use `claude-tg --bot devops` from any directory.
 
-```
-No bots configured. Let's add one.
-
-Bot name (e.g. ceo, support): devops
-Bot token (from @BotFather): 123456:ABC-DEF...
-Bot 'devops' saved.
-Starting Claude Code with bot: devops
-```
-
-On subsequent runs:
-- **One bot** — auto-selects it
-- **Multiple bots** — shows a numbered picker
+**Alternative: Interactive mode** — run `claude-tg` and pick a bot from the list.
 
 ### 5. Authorize your Telegram account
 
@@ -181,7 +200,29 @@ Each session reads its own `CLAUDE.md` and `.claude/skills/` — fully isolated 
 
 ### Manual setup (without `claude-tg`)
 
-If you prefer manual configuration, add to your project's `.mcp.json`:
+**SSE mode (recommended):**
+
+1. Start the SSE server (see step 3 above)
+2. Add to your agent's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ceo-agent-tools-channels": {
+      "type": "sse",
+      "url": "http://127.0.0.1:3200/sse?bot=devops"
+    }
+  }
+}
+```
+
+3. Launch Claude Code:
+
+```bash
+claude --dangerously-load-development-channels server:ceo-agent-tools-channels
+```
+
+**Stdio mode (single-bot, legacy):**
 
 ```json
 {
@@ -197,34 +238,38 @@ If you prefer manual configuration, add to your project's `.mcp.json`:
 }
 ```
 
-Then launch:
-
-```bash
-claude --dangerously-load-development-channels server:ceo-agent-tools-channels
-```
-
 ## Environment variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `TELEGRAM_BOT_NAME` | **yes** | — | Bot name to load from `~/.claude/telegram-bots.json`. **Only this bot will be started** — ensures strict per-agent routing. |
+| `TRANSPORT` | no | `stdio` | Transport mode: `sse` or `stdio`. Auto-set to `sse` if `PORT` is set. |
+| `PORT` | no | `3200` | Port for SSE server (only in SSE mode) |
+| `TELEGRAM_BOT_NAME` | no | — | Bot name filter (stdio mode only). In SSE mode, use `?bot=NAME` query param instead. |
 | `TELEGRAM_POLL_INTERVAL` | no | `1000` | Polling interval in ms |
-| `TELEGRAM_ACCESS_LIST` | no | `~/.claude/telegram-access-{name}.json` | Path to the access control file |
 | `DEBUG` | no | `0` | Set to `1` to enable debug logging to stderr |
-| `MCP_LOG_FILE` | no | — | Path to a file for persistent debug logging (e.g. `/tmp/mybot.log`) |
+| `MCP_LOG_FILE` | no | — | Path to a file for persistent debug logging |
 | `TELEGRAM_GROUP_POLICY` | no | `mention-only` | How to handle group chat messages: `open` \| `allowlist` \| `mention-only` |
 
-### Bot routing (important)
+### Bot routing
 
-When `TELEGRAM_BOT_NAME` is set, **only that bot is loaded** — the MCP server starts a single Telegram poller for that bot only. This prevents the "all agents receive all messages" problem when running multiple agents in parallel.
+**SSE mode:** Each Claude Code session connects to `http://host:port/sse?bot=NAME`. The server routes messages from that bot only to that session. Without `?bot=`, the session receives messages from all bots.
 
-`claude-tg` sets `TELEGRAM_BOT_NAME` automatically based on your selection. If launching manually, always pass it explicitly:
+**Stdio mode:** Set `TELEGRAM_BOT_NAME` env var — only that bot is loaded and polled.
 
-```json
-"env": { "TELEGRAM_BOT_NAME": "devops" }
+### Token deduplication
+
+If multiple bot names share the same token (e.g., `post`/`smm` are aliases for the same Telegram bot), the server polls once per unique token and delivers messages to all alias sessions. This prevents Telegram 409 Conflict errors.
+
+### SSE Health endpoint
+
+```bash
+curl http://127.0.0.1:3200/health
+# {"status":"ok","sessions":11,"bots":["devops","smm",...],"typing":2}
 ```
 
-If `TELEGRAM_BOT_NAME` is **not** set (legacy mode), all bots in the registry are loaded simultaneously. This is not recommended for multi-agent setups.
+### Typing indicator
+
+In SSE mode, when a Telegram message is forwarded to an agent, the server automatically sends `typing` action to the chat. The indicator repeats every 4 seconds and stops when the agent replies via `send_telegram_message` (or after 2-minute timeout).
 
 ## Tools
 
@@ -360,23 +405,17 @@ Debug mode enables verbose logging across all modules. Useful for troubleshootin
 
 ### Enabling
 
-Set `DEBUG=1` in the MCP server's environment.
-
-**Via `claude-tg`** — edit `claude-tg` and change `"DEBUG": "0"` to `"DEBUG": "1"` in the env block.
-
-**Via `.mcp.json`:**
-```json
-{
-  "env": {
-    "TELEGRAM_BOT_NAME": "devops",
-    "DEBUG": "1"
-  }
-}
+**SSE mode:** Set `DEBUG=1` in the launchd plist's `EnvironmentVariables` or when starting the server:
+```bash
+DEBUG=1 PORT=3200 TRANSPORT=sse node dist/index.js
 ```
+
+**Stdio mode:** Set `DEBUG=1` in `.mcp.json` env block.
 
 ### Where logs go
 
-All logs are written to **stderr** (MCP uses stdout for protocol messages). Claude Code captures stderr and shows it in the MCP server output.
+- **SSE mode:** `/tmp/ceo-agent-tools-channels.log` (configurable via `MCP_LOG_FILE`)
+- **Stdio mode:** stderr (captured by Claude Code)
 
 ### Log prefixes
 
@@ -411,11 +450,9 @@ Set `DEBUG=0` or remove the `DEBUG` env var. Non-debug logs (`[telegram-mcp]`) a
 
 ## Process cleanup
 
-The MCP server automatically exits when:
-- Claude Code closes stdin (normal exit or crash)
-- `SIGINT`, `SIGTERM`, or `SIGHUP` signal is received
+**SSE mode:** The server runs persistently via launchd. Individual sessions are cleaned up when the client disconnects. The server itself only stops on `SIGINT`/`SIGTERM`.
 
-This prevents zombie processes from accumulating after sessions end.
+**Stdio mode:** The MCP server exits when Claude Code closes stdin or on `SIGINT`/`SIGTERM`/`SIGHUP`.
 
 ## Skills
 
@@ -451,13 +488,28 @@ Claude will follow the skill and build everything automatically.
 
 ```
 src/
-├── index.ts          # Entry point: MCP server + Telegram polling loop + process cleanup
+├── index.ts          # Entry point: SSE/stdio server + Telegram polling + typing indicator + session routing
 ├── config.ts         # Bot registry (~/.claude/telegram-bots.json) + env vars → typed config
-├── telegram.ts       # Telegram Bot API client (zero deps, pure fetch)
+├── telegram.ts       # Telegram Bot API client (zero deps, pure fetch) + sendChatAction
 ├── access.ts         # Allowlist, pairing codes, policy management (per-bot files)
 ├── channel.ts        # Emits MCP channel notifications to Claude Code
 ├── permissions.ts    # Permission relay (Claude Code ↔ Telegram)
 └── tools.ts          # MCP tool definitions and handlers
+```
+
+### SSE mode internals
+
+```
+HTTP Server (port 3200)
+├── GET  /sse?bot=NAME    → SSE connection, creates MCP Server per session
+├── POST /messages?sessionId=xxx  → MCP messages from clients
+└── GET  /health          → JSON status (sessions, bots, typing count)
+
+Shared state:
+├── Telegram polling (one loop per unique token)
+├── Session map (sessionId → { server, transport, botName })
+├── Typing intervals (botName:chatId → setInterval)
+└── Token alias map (token → [botName1, botName2, ...])
 ```
 
 ## Acknowledgements

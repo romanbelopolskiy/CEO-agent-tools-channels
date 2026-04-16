@@ -1,37 +1,89 @@
 #!/usr/bin/env node
 
+import http from "node:http";
+import { URL } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { loadConfig } from "./config.js";
 import { TelegramClient } from "./telegram.js";
+import type { TelegramUser } from "./telegram.js";
 import { AccessControl } from "./access.js";
 import { PermissionManager } from "./permissions.js";
 import { emitChannelMessage, emitPermissionResponse } from "./channel.js";
-import { registerTools } from "./tools.js";
+import { registerTools, type BotContext } from "./tools.js";
+import type { GroupPolicy } from "./config.js";
+import { StatusManager, loadTelemetryConfig, type VerbosityMode } from "./status-messages.js";
 
-async function main() {
-  log("Starting MCP server...");
-  const config = loadConfig();
-  log(`Config loaded: bot="${config.botName}", accessList="${config.accessListPath}", poll=${config.pollInterval}ms`);
-  debug(`Token prefix: ${config.botToken.substring(0, 10)}...`);
+interface BotRuntime {
+  ctx: BotContext;
+  permissions: PermissionManager;
+  me: TelegramUser;
+  botUsername: string;
+}
 
-  const telegram = new TelegramClient(config.botToken);
-  const access = new AccessControl(config.accessListPath);
-  const permissions = new PermissionManager(telegram);
+// --- SSE session tracking ---
+interface SseSession {
+  id: string;
+  server: Server;
+  transport: SSEServerTransport;
+  botName: string | null; // null = all bots
+}
 
-  // Verify bot token
-  log("Verifying bot token with Telegram API...");
-  const me = await telegram.getMe();
-  log(`Bot connected: @${me.username} (${me.first_name})`);
-  debug(`Bot ID: ${me.id}, is_bot: ${me.is_bot}`);
-  log(`Group policy: ${config.groupPolicy}`);
+const sseSessions = new Map<string, SseSession>();
 
-  const botUsername = me.username?.toLowerCase() || "";
+// --- Status manager (live status messages per ТЗ) ---
+let statusManager: StatusManager | null = null;
+let telemetryMode: VerbosityMode = "status";
 
-  // Create MCP server
+// Load per-agent config if we're inside an agent dir.
+try {
+  const agentDir = process.env.AGENT_DIR || process.cwd();
+  const cfg = loadTelemetryConfig(agentDir);
+  telemetryMode = cfg.mode;
+} catch {}
+
+// --- Typing indicator ---
+const typingIntervals = new Map<string, NodeJS.Timeout>();
+
+function startTyping(botsMap: Map<string, BotContext>, botName: string, chatId: number) {
+  const key = `${botName}:${chatId}`;
+  if (typingIntervals.has(key)) return;
+
+  const bot = botsMap.get(botName);
+  if (!bot) return;
+
+  bot.telegram.sendChatAction(chatId, "typing").catch(() => {});
+
+  const interval = setInterval(() => {
+    bot.telegram.sendChatAction(chatId, "typing").catch(() => {});
+  }, 4000);
+
+  typingIntervals.set(key, interval);
+
+  // Auto-stop after 2 minutes
+  setTimeout(() => stopTyping(botName, chatId), 120_000);
+}
+
+function stopTyping(botName: string, chatId: number) {
+  const key = `${botName}:${chatId}`;
+  const interval = typingIntervals.get(key);
+  if (interval) {
+    clearInterval(interval);
+    typingIntervals.delete(key);
+  }
+}
+
+// --- Build MCP Server instance ---
+function createMcpServer(
+  runtimes: BotRuntime[],
+  botsMap: Map<string, BotContext>
+): Server {
+  const botList = runtimes.map((r) => `"${r.ctx.name}" (@${r.me.username})`).join(", ");
+
   const server = new Server(
     {
-      name: `telegram-channel-${config.botName}`,
+      name: "telegram-channels",
       version: "1.0.0",
     },
     {
@@ -43,18 +95,17 @@ async function main() {
         tools: {},
       },
       instructions: [
-        `This is a Telegram channel plugin (bot: "${config.botName}").`,
+        `This is a multi-bot Telegram channel plugin with ${runtimes.length} bot(s): ${botList}.`,
         `When a user asks you to pair with a code (e.g. "pair code abc123"), call the telegram_access tool with action "pair" and the code.`,
         `Do NOT run "claude pair" shell command — that is an unrelated pair-coding feature.`,
-        `Use send_telegram_message to reply to Telegram users. The chat_id comes from channel message metadata.`,
+        `Use send_telegram_message to reply. The bot_name and chat_id come from channel message metadata.`,
+        `Always use the same bot_name that the message arrived on.`,
       ].join("\n"),
     }
   );
 
-  // Register tools
-  registerTools(server, telegram, access, config.botName);
+  registerTools(server, botsMap, stopTyping, statusManager);
 
-  // Handle permission requests from Claude Code via fallback notification handler
   server.fallbackNotificationHandler = async (notification) => {
     if (notification.method !== "notifications/claude/channel/permission_request") {
       return;
@@ -67,103 +118,307 @@ async function main() {
     const toolName = params.toolName as string;
     const description = params.description as string;
 
-    // Forward to all allowed users
-    const users = access.listUsers();
-    if (users.length === 0) {
-      log("Permission request received but no paired users to forward to");
-      return;
-    }
-
-    for (const userId of users) {
-      try {
-        await permissions.forwardRequest(userId, requestId, toolName, description);
-      } catch (err) {
-        log(`Failed to forward permission request to user ${userId}: ${err}`);
+    for (const runtime of runtimes) {
+      const users = runtime.ctx.access.listUsers();
+      for (const userId of users) {
+        try {
+          await runtime.permissions.forwardRequest(userId, requestId, toolName, description);
+        } catch (err) {
+          log(`Failed to forward permission to user ${userId} via ${runtime.ctx.name}: ${err}`);
+        }
       }
     }
   };
 
-  // Start stdio transport
+  return server;
+}
+
+// --- Get all bot names that share a token with the given bot ---
+function getBotAliases(botName: string, botsMap: Map<string, BotContext>): string[] {
+  const bot = botsMap.get(botName);
+  if (!bot) return [botName];
+
+  // Find the token for this bot by checking tokenAliases
+  for (const [, aliases] of tokenAliases) {
+    if (aliases.includes(botName)) {
+      return aliases;
+    }
+  }
+  return [botName];
+}
+
+// --- Route channel message to matching SSE sessions ---
+function routeToSessions(
+  botsMap: Map<string, BotContext>,
+  botName: string,
+  msg: any,
+  botMentioned: boolean,
+  isReplyToBot: boolean
+) {
+  const chatId = msg.chat?.id;
+  const aliases = getBotAliases(botName, botsMap);
+
+  let delivered = false;
+  for (const [, session] of sseSessions) {
+    if (session.botName === null || aliases.includes(session.botName)) {
+      // Use the session's own bot name so the agent sees its expected bot
+      const effectiveBotName = session.botName || botName;
+      emitChannelMessage(session.server, effectiveBotName, msg, botMentioned, isReplyToBot);
+      delivered = true;
+    }
+  }
+
+  if (delivered && chatId) {
+    startTyping(botsMap, botName, chatId);
+
+    // Create live status message for this task.
+    if (statusManager && telemetryMode !== "silent") {
+      const taskId = `${botName}:${chatId}:${Date.now()}`;
+      const msgId = msg.message_id || 0;
+      statusManager.startTask({
+        taskId,
+        botName,
+        chatId,
+        sourceMessageId: msgId,
+        mode: telemetryMode,
+      }).catch((err) => log(`status startTask error: ${err}`));
+    }
+  }
+
+  if (!delivered) {
+    log(`No SSE session for bot "${botName}" (aliases: ${aliases.join(",")}), message dropped`);
+  }
+}
+
+// --- Token alias tracking ---
+// Maps token -> primary bot name (first bot registered with that token)
+const tokenPrimaryBot = new Map<string, string>();
+// Maps token -> all bot names sharing that token
+const tokenAliases = new Map<string, string[]>();
+
+// --- Initialize bots ---
+async function initBots(config: ReturnType<typeof loadConfig>) {
+  const botsMap = new Map<string, BotContext>();
+  const runtimes: BotRuntime[] = [];
+  const clientsByToken = new Map<string, TelegramClient>();
+
+  for (const botEntry of config.bots) {
+    log(`Connecting bot "${botEntry.name}"...`);
+
+    // Share TelegramClient for bots with same token
+    let telegram = clientsByToken.get(botEntry.token);
+    if (!telegram) {
+      telegram = new TelegramClient(botEntry.token);
+      clientsByToken.set(botEntry.token, telegram);
+    }
+
+    // Track token aliases
+    if (!tokenAliases.has(botEntry.token)) {
+      tokenAliases.set(botEntry.token, []);
+    }
+    tokenAliases.get(botEntry.token)!.push(botEntry.name);
+
+    const access = new AccessControl(botEntry.accessListPath);
+    const permissions = new PermissionManager(telegram);
+
+    try {
+      const me = await telegram.getMe();
+      log(`Bot "${botEntry.name}" connected: @${me.username} (${me.first_name})`);
+
+      const ctx: BotContext = { name: botEntry.name, telegram, access };
+      botsMap.set(botEntry.name, ctx);
+
+      // Only create runtime for the first bot per token (avoids duplicate polling)
+      if (!tokenPrimaryBot.has(botEntry.token)) {
+        tokenPrimaryBot.set(botEntry.token, botEntry.name);
+        runtimes.push({
+          ctx,
+          permissions,
+          me,
+          botUsername: me.username?.toLowerCase() || "",
+        });
+      } else {
+        log(`Bot "${botEntry.name}" shares token with "${tokenPrimaryBot.get(botEntry.token)}", skipping duplicate poll`);
+      }
+    } catch (err) {
+      log(`Failed to connect bot "${botEntry.name}": ${err}`);
+    }
+  }
+
+  if (runtimes.length === 0) {
+    throw new Error("No bots connected successfully. Check your tokens.");
+  }
+
+  log(`${runtimes.length} bot(s) online (${botsMap.size} names, ${runtimes.length} unique tokens polling)`);
+  return { botsMap, runtimes };
+}
+
+// --- SSE mode ---
+async function startSseServer(
+  port: number,
+  runtimes: BotRuntime[],
+  botsMap: Map<string, BotContext>,
+  config: ReturnType<typeof loadConfig>
+) {
+  // Start polling (shared, one loop per bot)
+  for (const runtime of runtimes) {
+    startPolling(null, botsMap, runtime, config.groupPolicy, config.pollInterval, "sse");
+  }
+
+  const httpServer = http.createServer(async (req, res) => {
+    const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
+
+    // --- SSE endpoint ---
+    if (req.method === "GET" && url.pathname === "/sse") {
+      const botName = url.searchParams.get("bot") || null;
+      const transport = new SSEServerTransport("/messages", res);
+      const sessionId = transport.sessionId;
+      const server = createMcpServer(runtimes, botsMap);
+
+      sseSessions.set(sessionId, { id: sessionId, server, transport, botName });
+      log(`SSE session ${sessionId} connected (bot: ${botName || "all"})`);
+
+      res.on("close", () => {
+        sseSessions.delete(sessionId);
+        log(`SSE session ${sessionId} disconnected`);
+      });
+
+      await server.connect(transport);
+      return;
+    }
+
+    // --- POST messages ---
+    if (req.method === "POST" && url.pathname === "/messages") {
+      const sessionId = url.searchParams.get("session_id") || url.searchParams.get("sessionId");
+      if (!sessionId) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("Missing session_id");
+        return;
+      }
+
+      const session = sseSessions.get(sessionId);
+      if (!session) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("Session not found");
+        return;
+      }
+
+      await session.transport.handlePostMessage(req, res);
+      return;
+    }
+
+    // --- Health check ---
+    if (req.method === "GET" && url.pathname === "/health") {
+      const info = {
+        status: "ok",
+        sessions: sseSessions.size,
+        bots: Array.from(botsMap.keys()),
+        typing: typingIntervals.size,
+      };
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(info));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end("Not found");
+  });
+
+  httpServer.listen(port, "127.0.0.1", () => {
+    log(`SSE server listening on http://127.0.0.1:${port}`);
+    log(`Connect agents with: "url": "http://127.0.0.1:${port}/sse?bot=BOT_NAME"`);
+  });
+
+  process.on("SIGINT", () => shutdown(httpServer));
+  process.on("SIGTERM", () => shutdown(httpServer));
+}
+
+async function shutdown(httpServer: http.Server) {
+  log("Shutting down...");
+  for (const [id, session] of sseSessions) {
+    try {
+      await session.transport.close();
+    } catch {}
+    sseSessions.delete(id);
+  }
+  for (const [key, interval] of typingIntervals) {
+    clearInterval(interval);
+    typingIntervals.delete(key);
+  }
+  httpServer.close();
+  process.exit(0);
+}
+
+// --- Stdio mode (backward compat) ---
+async function startStdioServer(
+  runtimes: BotRuntime[],
+  botsMap: Map<string, BotContext>,
+  config: ReturnType<typeof loadConfig>
+) {
+  const server = createMcpServer(runtimes, botsMap);
+
   log("Connecting stdio transport...");
   const transport = new StdioServerTransport();
   await server.connect(transport);
   log("MCP server started on stdio");
-  debug(`Server name: telegram-channel-${config.botName}`);
 
-  // Exit when parent (Claude Code) closes stdin
-  process.stdin.on("end", () => {
-    log("stdin closed, exiting");
-    process.exit(0);
-  });
-  process.stdin.on("close", () => {
-    log("stdin closed, exiting");
-    process.exit(0);
-  });
-
-  // Exit on signals
+  process.stdin.on("end", () => { log("stdin closed, exiting"); process.exit(0); });
+  process.stdin.on("close", () => { log("stdin closed, exiting"); process.exit(0); });
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-    process.on(sig, () => {
-      log(`Received ${sig}, exiting`);
-      process.exit(0);
-    });
+    process.on(sig, () => { log(`Received ${sig}, exiting`); process.exit(0); });
   }
 
-  // Start polling — claim exclusive polling access and flush old updates
-  log("Deleting webhook and flushing old updates...");
-  await telegram.deleteWebhook(true);
-  let offset: number | undefined;
-
-  // Skip any messages that arrived before this session
-  const pending = await telegram.getUpdates(undefined, 0, 100);
-  if (pending.length > 0) {
-    offset = pending[pending.length - 1].update_id + 1;
-    log(`Skipped ${pending.length} old update(s)`);
-  } else {
-    debug("No pending updates to skip");
+  for (const runtime of runtimes) {
+    startPolling(server, botsMap, runtime, config.groupPolicy, config.pollInterval, "stdio");
   }
-  log("Polling started");
+}
 
-  // Track users who have already been notified about pairing (debounce)
+// --- Polling ---
+function startPolling(
+  stdioServer: Server | null,
+  botsMap: Map<string, BotContext>,
+  runtime: BotRuntime,
+  groupPolicy: GroupPolicy,
+  pollInterval: number,
+  mode: "stdio" | "sse"
+) {
+  const { ctx, permissions, me, botUsername } = runtime;
+  const { name: botName, telegram, access } = ctx;
   const pairingNotified = new Set<number>();
 
   const poll = async () => {
+    await telegram.deleteWebhook(true);
+    let offset: number | undefined;
+
+    const pending = await telegram.getUpdates(undefined, 0, 100);
+    if (pending.length > 0) {
+      offset = pending[pending.length - 1].update_id + 1;
+      log(`[${botName}] Skipped ${pending.length} old update(s)`);
+    }
+    log(`[${botName}] Polling started (${mode} mode)`);
+
     while (true) {
       try {
         const updates = await telegram.getUpdates(offset, 1);
-        if (updates.length > 0) {
-          debug(`Got ${updates.length} update(s)`);
-        }
 
         for (const update of updates) {
           offset = update.update_id + 1;
 
-          if (!update.message?.from) {
-            debug(`Skipping update ${update.update_id}: no from`);
-            continue;
-          }
+          if (!update.message?.from) continue;
 
-          // Accept text, photo, document messages; skip everything else
           const msg = update.message;
-          if (!msg.text && !msg.photo && !msg.document) {
-            debug(`Skipping update ${update.update_id}: not text/photo/document`);
-            continue;
-          }
+          if (!msg.text && !msg.photo && !msg.document) continue;
 
           const userId = msg.from!.id;
           const chatType = msg.chat.type || "private";
           const isGroup = ["group", "supergroup", "channel"].includes(chatType);
 
-          // --- Group policy check ---
+          // --- Group chat ---
           if (isGroup) {
             const msgText = (msg.text || msg.caption || "").toLowerCase();
             const entities = msg.entities || msg.caption_entities || [];
 
-            // Detect bot mention via @username in text
-            const mentionedInText = botUsername
-              ? msgText.includes(`@${botUsername}`)
-              : false;
-
-            // Detect bot mention via mention entity (works for private/public bots)
+            const mentionedInText = botUsername ? msgText.includes(`@${botUsername}`) : false;
             const mentionedViaEntity = entities.some((e) => {
               if (e.type === "mention") {
                 const slice = (msg.text || msg.caption || "").substring(e.offset, e.offset + e.length).toLowerCase();
@@ -176,201 +431,148 @@ async function main() {
             });
 
             const botMentioned = mentionedInText || mentionedViaEntity;
+            const isReplyToBot = !!(msg.reply_to_message?.from?.id === me.id);
 
-            // Detect reply to bot message
-            const isReplyToBot = !!(
-              msg.reply_to_message?.from?.id === me.id
-            );
+            if (groupPolicy === "mention-only" && !botMentioned && !isReplyToBot) continue;
+            if (groupPolicy === "allowlist" && !access.isAllowed(userId, msg.chat.id)) continue;
 
-            if (config.groupPolicy === "mention-only" && !botMentioned && !isReplyToBot) {
-              debug(`Skipping group message (mention-only policy, bot not mentioned): chat=${msg.chat.id}`);
-              continue;
-            }
-
-            if (config.groupPolicy === "allowlist" && !access.isAllowed(userId, msg.chat.id)) {
-              debug(`Skipping group message (allowlist policy, user ${userId} / chat ${msg.chat.id} not allowed)`);
-              continue;
-            }
-            // "open" policy: fall through to normal processing
-
-            // Build text content including media info
             let text = msg.text || msg.caption || "";
-
-            // Strip bot mention from text so agent sees clean command
             if (botUsername && text.toLowerCase().includes(`@${botUsername}`)) {
               text = text.replace(new RegExp(`@${botUsername}`, "gi"), "").trim();
             }
 
-            // Handle photo
-            if (msg.photo && msg.photo.length > 0) {
-              try {
-                const largest = msg.photo[msg.photo.length - 1];
-                const fileInfo = await telegram.getFile(largest.file_id);
-                const fileData = await telegram.downloadFile(fileInfo.file_path);
-                const ext = fileInfo.file_path.split(".").pop() || "jpg";
-                const tmpPath = `/tmp/tg-photo-${largest.file_unique_id}.${ext}`;
-                const fs = await import("node:fs/promises");
-                await fs.writeFile(tmpPath, fileData);
-                const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
-                text = `[photo saved to ${tmpPath}${caption}]${text ? "\n" + text : ""}`;
-                log(`Photo saved: ${tmpPath}`);
-              } catch (err) {
-                log(`Failed to download photo: ${err}`);
-                text = `[photo - download failed]${text ? "\n" + text : ""}`;
-              }
-            }
-
-            // Handle document
-            if (msg.document) {
-              try {
-                const doc = msg.document;
-                const fileInfo = await telegram.getFile(doc.file_id);
-                const fileData = await telegram.downloadFile(fileInfo.file_path);
-                const fileName = doc.file_name || `document.${doc.mime_type?.split("/")[1] || "bin"}`;
-                const tmpPath = `/tmp/tg-doc-${doc.file_unique_id}-${fileName}`;
-                const fs = await import("node:fs/promises");
-                await fs.writeFile(tmpPath, fileData);
-                const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
-                text = `[document: ${fileName} (${doc.mime_type || "unknown"}) saved to ${tmpPath}${caption}]${text ? "\n" + text : ""}`;
-                log(`Document saved: ${tmpPath}`);
-              } catch (err) {
-                log(`Failed to download document: ${err}`);
-                text = `[document: ${msg.document.file_name || "unknown"} - download failed]${text ? "\n" + text : ""}`;
-              }
-            }
-
-            if (!text || text.trim() === "") {
-              text = "[message received - no text content]";
-            }
-
+            text = await enrichMedia(telegram, msg, text, botName);
+            if (!text || text.trim() === "") text = "[message received - no text content]";
             (msg as unknown as Record<string, unknown>).text = text;
 
-            debug(`Group message: user=${userId} (@${msg.from!.username || msg.from!.first_name}) mentioned=${botMentioned} reply=${isReplyToBot} text="${text.substring(0, 80)}"`);
-
-            // Check permission response (even in groups)
             const permResult = permissions.tryMatch(text);
             if (permResult) {
-              emitPermissionResponse(server, permResult.requestId, permResult.approved);
-              const emoji = permResult.approved ? "✅" : "❌";
+              if (mode === "stdio" && stdioServer) {
+                emitPermissionResponse(stdioServer, permResult.requestId, permResult.approved);
+              } else {
+                // Broadcast to all sessions for this bot
+                for (const [, session] of sseSessions) {
+                  if (session.botName === null || session.botName === botName) {
+                    emitPermissionResponse(session.server, permResult.requestId, permResult.approved);
+                  }
+                }
+              }
+              const emoji = permResult.approved ? "\u2705" : "\u274C";
               await telegram.sendMessage(msg.chat.id, `${emoji} Permission ${permResult.approved ? "granted" : "denied"}.`);
               continue;
             }
 
-            log(`Group message from @${msg.from!.username || msg.from!.first_name} in "${msg.chat.title || msg.chat.id}": ${text.substring(0, 50)}...`);
-            emitChannelMessage(server, config.botName, msg, botMentioned, isReplyToBot);
+            log(`[${botName}] Group msg from @${msg.from!.username || msg.from!.first_name} in "${msg.chat.title || msg.chat.id}"`);
+
+            if (mode === "stdio" && stdioServer) {
+              emitChannelMessage(stdioServer, botName, msg, botMentioned, isReplyToBot);
+            } else {
+              routeToSessions(botsMap, botName, msg, botMentioned, isReplyToBot);
+            }
             continue;
           }
 
-          // --- Private chat (DM) logic below ---
-
-          // Build text content including media info
+          // --- Private chat ---
           let text = msg.text || msg.caption || "";
-
-          // Handle photo: download largest size, save to temp, prepend [photo] tag
-          if (msg.photo && msg.photo.length > 0) {
-            try {
-              const largest = msg.photo[msg.photo.length - 1];
-              const fileInfo = await telegram.getFile(largest.file_id);
-              const fileData = await telegram.downloadFile(fileInfo.file_path);
-              const ext = fileInfo.file_path.split(".").pop() || "jpg";
-              const tmpPath = `/tmp/tg-photo-${largest.file_unique_id}.${ext}`;
-              const fs = await import("node:fs/promises");
-              await fs.writeFile(tmpPath, fileData);
-              const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
-              text = `[photo saved to ${tmpPath}${caption}]${text ? "\n" + text : ""}`;
-              log(`Photo saved: ${tmpPath}`);
-            } catch (err) {
-              log(`Failed to download photo: ${err}`);
-              text = `[photo - download failed]${text ? "\n" + text : ""}`;
-            }
-          }
-
-          // Handle document
-          if (msg.document) {
-            try {
-              const doc = msg.document;
-              const fileInfo = await telegram.getFile(doc.file_id);
-              const fileData = await telegram.downloadFile(fileInfo.file_path);
-              const fileName = doc.file_name || `document.${doc.mime_type?.split("/")[1] || "bin"}`;
-              const tmpPath = `/tmp/tg-doc-${doc.file_unique_id}-${fileName}`;
-              const fs = await import("node:fs/promises");
-              await fs.writeFile(tmpPath, fileData);
-              const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
-              text = `[document: ${fileName} (${doc.mime_type || "unknown"}) saved to ${tmpPath}${caption}]${text ? "\n" + text : ""}`;
-              log(`Document saved: ${tmpPath}`);
-            } catch (err) {
-              log(`Failed to download document: ${err}`);
-              text = `[document: ${msg.document.file_name || "unknown"} - download failed]${text ? "\n" + text : ""}`;
-            }
-          }
-
-          // Ensure text is never empty — Claude Code ignores empty channel messages
-          if (!text || text.trim() === "") {
-            text = "[message received - no text content]";
-          }
-
-          // Patch msg.text so emitChannelMessage sends enriched content
+          text = await enrichMedia(telegram, msg, text, botName);
+          if (!text || text.trim() === "") text = "[message received - no text content]";
           (msg as unknown as Record<string, unknown>).text = text;
 
-          debug(`Update ${update.update_id}: user=${userId} (@${msg.from!.username || msg.from!.first_name}) text="${text.substring(0, 80)}"`);
-
-          // Check if this is a permission response
           const permResult = permissions.tryMatch(text);
           if (permResult) {
-            emitPermissionResponse(server, permResult.requestId, permResult.approved);
-            const emoji = permResult.approved ? "✅" : "❌";
-            await telegram.sendMessage(
-              msg.chat.id,
-              `${emoji} Permission ${permResult.approved ? "granted" : "denied"}.`
-            );
+            if (mode === "stdio" && stdioServer) {
+              emitPermissionResponse(stdioServer, permResult.requestId, permResult.approved);
+            } else {
+              for (const [, session] of sseSessions) {
+                if (session.botName === null || session.botName === botName) {
+                  emitPermissionResponse(session.server, permResult.requestId, permResult.approved);
+                }
+              }
+            }
+            const emoji = permResult.approved ? "\u2705" : "\u274C";
+            await telegram.sendMessage(msg.chat.id, `${emoji} Permission ${permResult.approved ? "granted" : "denied"}.`);
             continue;
           }
 
-          // Check access
           if (!access.isAllowed(userId, msg.chat.id)) {
-            debug(`User ${userId} / chat ${msg.chat.id} not in allowlist`);
-            // Only send pairing message once per user per session
             if (!pairingNotified.has(userId)) {
               pairingNotified.add(userId);
               const code = access.generatePairingCode(userId, msg.chat.id);
-              log(`Pairing code "${code}" generated for user ${userId} (chat ${msg.chat.id})`);
-              await telegram.sendMessage(
-                msg.chat.id,
-                `\`pair code ${code}\``
-              );
-              debug(`Pairing message sent to chat ${msg.chat.id}`);
-            } else {
-              debug(`User ${userId} already notified about pairing, skipping`);
+              log(`[${botName}] Pairing code "${code}" for user ${userId}`);
+              await telegram.sendMessage(msg.chat.id, `\`pair code ${code}\``);
             }
             continue;
           }
 
-          // User is now authorized — clear pairing debounce if present
           pairingNotified.delete(userId);
-          debug(`User ${userId} authorized, emitting channel message`);
+          log(`[${botName}] DM from @${msg.from!.username || msg.from!.first_name}: ${text.substring(0, 50)}...`);
 
-          // Emit to Claude Code
-          log(
-            `DM from @${msg.from!.username || msg.from!.first_name}: ${text.substring(0, 50)}...`
-          );
-          emitChannelMessage(server, config.botName, msg, false, false);
+          if (mode === "stdio" && stdioServer) {
+            emitChannelMessage(stdioServer, botName, msg, false, false);
+          } else {
+            routeToSessions(botsMap, botName, msg, false, false);
+          }
         }
       } catch (err) {
-        log(`Polling error: ${err}`);
+        log(`[${botName}] Polling error: ${err}`);
       }
 
-      await sleep(config.pollInterval);
+      await sleep(pollInterval);
     }
   };
 
   poll().catch((err) => {
-    log(`Fatal polling error: ${err}`);
-    process.exit(1);
+    log(`[${botName}] Fatal polling error: ${err}`);
   });
 }
 
-const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
+async function enrichMedia(
+  telegram: TelegramClient,
+  msg: { photo?: any[]; document?: any; caption?: string; text?: string },
+  text: string,
+  botName: string
+): Promise<string> {
+  const fs = await import("node:fs/promises");
 
+  if (msg.photo && msg.photo.length > 0) {
+    try {
+      const largest = msg.photo[msg.photo.length - 1];
+      const fileInfo = await telegram.getFile(largest.file_id);
+      const fileData = await telegram.downloadFile(fileInfo.file_path);
+      const ext = fileInfo.file_path.split(".").pop() || "jpg";
+      const tmpPath = `/tmp/tg-photo-${largest.file_unique_id}.${ext}`;
+      await fs.writeFile(tmpPath, fileData);
+      const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
+      text = `[photo saved to ${tmpPath}${caption}]${text ? "\n" + text : ""}`;
+      log(`[${botName}] Photo saved: ${tmpPath}`);
+    } catch (err) {
+      log(`[${botName}] Failed to download photo: ${err}`);
+      text = `[photo - download failed]${text ? "\n" + text : ""}`;
+    }
+  }
+
+  if (msg.document) {
+    try {
+      const doc = msg.document;
+      const fileInfo = await telegram.getFile(doc.file_id);
+      const fileData = await telegram.downloadFile(fileInfo.file_path);
+      const fileName = doc.file_name || `document.${doc.mime_type?.split("/")[1] || "bin"}`;
+      const tmpPath = `/tmp/tg-doc-${doc.file_unique_id}-${fileName}`;
+      await fs.writeFile(tmpPath, fileData);
+      const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
+      text = `[document: ${fileName} (${doc.mime_type || "unknown"}) saved to ${tmpPath}${caption}]${text ? "\n" + text : ""}`;
+      log(`[${botName}] Document saved: ${tmpPath}`);
+    } catch (err) {
+      log(`[${botName}] Failed to download document: ${err}`);
+      text = `[document: ${msg.document.file_name || "unknown"} - download failed]${text ? "\n" + text : ""}`;
+    }
+  }
+
+  return text;
+}
+
+// --- Logging ---
+const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
 const LOG_FILE = process.env.MCP_LOG_FILE;
 
 export function log(message: string): void {
@@ -392,6 +594,30 @@ export function debug(message: string): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// --- Main ---
+async function main() {
+  log("Starting MCP server...");
+  const config = loadConfig();
+  log(`Loaded ${config.bots.length} bot(s): ${config.bots.map((b) => b.name).join(", ")}`);
+
+  const { botsMap, runtimes } = await initBots(config);
+
+  // Initialize status manager with access to bot clients.
+  statusManager = new StatusManager((botName) => botsMap.get(botName)?.telegram);
+
+  // Periodic GC of old finished tasks.
+  setInterval(() => statusManager?.gc(), 60_000);
+
+  const transport = process.env.TRANSPORT || (process.env.PORT ? "sse" : "stdio");
+  const port = parseInt(process.env.PORT || "3200");
+
+  if (transport === "sse") {
+    await startSseServer(port, runtimes, botsMap, config);
+  } else {
+    await startStdioServer(runtimes, botsMap, config);
+  }
 }
 
 main().catch((err) => {

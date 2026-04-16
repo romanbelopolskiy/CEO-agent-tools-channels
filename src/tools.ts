@@ -5,19 +5,30 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { TelegramClient } from "./telegram.js";
 import type { AccessControl } from "./access.js";
+import type { StatusManager } from "./status-messages.js";
 
 const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
 function debug(msg: string) { if (DEBUG) process.stderr.write(`[tools:debug] ${msg}\n`); }
 function log(msg: string) { process.stderr.write(`[telegram-mcp] ${msg}\n`); }
 
+export interface BotContext {
+  name: string;
+  telegram: TelegramClient;
+  access: AccessControl;
+}
+
 const TOOLS = [
   {
     name: "send_telegram_message",
     description:
-      "Send a message to a Telegram chat. Use this to reply to the user who messaged you through the channel.",
+      "Send a message to a Telegram chat. Use this to reply to the user who messaged you through the channel. The bot_name must match the source from the channel message.",
     inputSchema: {
       type: "object" as const,
       properties: {
+        bot_name: {
+          type: "string",
+          description: "Bot name (from channel message source / metadata)",
+        },
         chat_id: {
           type: "number",
           description: "Telegram chat ID (from channel metadata)",
@@ -27,7 +38,7 @@ const TOOLS = [
           description: "Message text (Markdown supported)",
         },
       },
-      required: ["chat_id", "text"],
+      required: ["bot_name", "chat_id", "text"],
     },
   },
   {
@@ -37,6 +48,10 @@ const TOOLS = [
     inputSchema: {
       type: "object" as const,
       properties: {
+        bot_name: {
+          type: "string",
+          description: "Bot name to manage access for",
+        },
         action: {
           type: "string",
           enum: ["pair", "unpair", "list", "set-policy"],
@@ -56,16 +71,24 @@ const TOOLS = [
           description: "Access policy (for 'set-policy' action)",
         },
       },
-      required: ["action"],
+      required: ["bot_name", "action"],
+    },
+  },
+  {
+    name: "list_telegram_bots",
+    description: "List all registered Telegram bots and their status.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
     },
   },
 ];
 
 export function registerTools(
   server: Server,
-  telegram: TelegramClient,
-  access: AccessControl,
-  botName: string
+  botsMap: Map<string, BotContext>,
+  onMessageSent?: (botName: string, chatId: number) => void,
+  statusManager?: StatusManager | null
 ): void {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: TOOLS,
@@ -75,10 +98,50 @@ export function registerTools(
     const { name, arguments: args } = request.params;
     log(`Tool called: ${name}(${JSON.stringify(args)})`);
 
+    // Emit tool_started status for any tool call (not just send_telegram_message).
+    const toolChatId = args?.chat_id as number | undefined;
+    const toolBotName = args?.bot_name as string | undefined;
+    if (statusManager && toolChatId) {
+      const task = statusManager.findTaskByChatId(toolChatId);
+      if (task) {
+        statusManager.emitEvent({
+          type: "tool_started",
+          taskId: task.taskId,
+          tool: name,
+        });
+      }
+    }
+
+    function getBot(botName?: string): BotContext | null {
+      if (!botName) return null;
+      return botsMap.get(botName) || null;
+    }
+
     switch (name) {
+      case "list_telegram_bots": {
+        const lines = Array.from(botsMap.entries()).map(
+          ([n, ctx]) => `- ${n}`
+        );
+        return {
+          content: [
+            { type: "text", text: `Registered bots (${botsMap.size}):\n${lines.join("\n")}` },
+          ],
+        };
+      }
+
       case "send_telegram_message": {
+        const botName = args?.bot_name as string;
         const chatId = args?.chat_id as number;
         const text = args?.text as string;
+
+        const bot = getBot(botName);
+        if (!bot) {
+          return {
+            content: [
+              { type: "text", text: `Error: bot "${botName}" not found. Use list_telegram_bots to see available bots.` },
+            ],
+          };
+        }
 
         if (!chatId || !text) {
           return {
@@ -89,10 +152,20 @@ export function registerTools(
         }
 
         try {
-          await telegram.sendMessage(chatId, text);
+          onMessageSent?.(botName, chatId);
+          await bot.telegram.sendMessage(chatId, text);
+
+          // Finalize live status — agent has replied.
+          if (statusManager) {
+            const task = statusManager.findTaskByChatId(chatId);
+            if (task) {
+              statusManager.finishTask(task.taskId);
+            }
+          }
+
           return {
             content: [
-              { type: "text", text: `Message sent to chat ${chatId}` },
+              { type: "text", text: `Message sent via ${botName} to chat ${chatId}` },
             ],
           };
         } catch (err) {
@@ -106,7 +179,17 @@ export function registerTools(
       }
 
       case "telegram_access": {
+        const botName = args?.bot_name as string;
         const action = args?.action as string;
+
+        const bot = getBot(botName);
+        if (!bot) {
+          return {
+            content: [
+              { type: "text", text: `Error: bot "${botName}" not found. Use list_telegram_bots to see available bots.` },
+            ],
+          };
+        }
 
         switch (action) {
           case "pair": {
@@ -116,13 +199,12 @@ export function registerTools(
                 content: [{ type: "text", text: "Error: code is required" }],
               };
             }
-            const result = access.pair(code);
+            const result = bot.access.pair(code);
             debug(`pair result: ${JSON.stringify(result)}`);
             if (result.success) {
-              // Notify user in Telegram
               if (result.chatId) {
                 log(`Sending authorization confirmation to chat ${result.chatId} for bot "${botName}"`);
-                telegram.sendMessage(
+                bot.telegram.sendMessage(
                   result.chatId,
                   `✅ Bot authorized as *${botName}*. You can now send messages.`
                 ).catch((err) => { log(`Failed to send auth confirmation: ${err}`); });
@@ -131,17 +213,14 @@ export function registerTools(
                 content: [
                   {
                     type: "text",
-                    text: `Paired user ${result.userId}. They can now send messages.`,
+                    text: `Paired user ${result.userId}. They can now send messages via ${botName}.`,
                   },
                 ],
               };
             }
             return {
               content: [
-                {
-                  type: "text",
-                  text: "Invalid or expired pairing code.",
-                },
+                { type: "text", text: "Invalid or expired pairing code." },
               ],
             };
           }
@@ -155,27 +234,27 @@ export function registerTools(
                 ],
               };
             }
-            const removed = access.unpair(userId);
+            const removed = bot.access.unpair(userId);
             return {
               content: [
                 {
                   type: "text",
                   text: removed
-                    ? `Removed user ${userId} from allowlist.`
-                    : `User ${userId} was not in the allowlist.`,
+                    ? `Removed user ${userId} from ${botName} allowlist.`
+                    : `User ${userId} was not in the ${botName} allowlist.`,
                 },
               ],
             };
           }
 
           case "list": {
-            const users = access.listUsers();
-            const policy = access.policy;
+            const users = bot.access.listUsers();
+            const policy = bot.access.policy;
             return {
               content: [
                 {
                   type: "text",
-                  text: `Policy: ${policy}\nAllowed users: ${users.length > 0 ? users.join(", ") : "(none)"}`,
+                  text: `Bot: ${botName}\nPolicy: ${policy}\nAllowed users: ${users.length > 0 ? users.join(", ") : "(none)"}`,
                 },
               ],
             };
@@ -193,10 +272,10 @@ export function registerTools(
                 ],
               };
             }
-            access.setPolicy(policy);
+            bot.access.setPolicy(policy);
             return {
               content: [
-                { type: "text", text: `Access policy set to: ${policy}` },
+                { type: "text", text: `${botName} access policy set to: ${policy}` },
               ],
             };
           }

@@ -142,6 +142,27 @@ export class TelegramClient {
     return this.request<{ file_path: string }>("getFile", { file_id: fileId });
   }
 
+  async editMessageText(
+    chatId: number,
+    messageId: number,
+    text: string,
+    parseMode: string = "Markdown"
+  ): Promise<TelegramMessage | boolean> {
+    return this.request<TelegramMessage | boolean>("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: parseMode,
+    });
+  }
+
+  async sendChatAction(chatId: number, action: string = "typing"): Promise<boolean> {
+    return this.request<boolean>("sendChatAction", {
+      chat_id: chatId,
+      action,
+    });
+  }
+
   async downloadFile(filePath: string): Promise<Buffer> {
     const url = `${BASE_URL}/file/bot${this.token}/${filePath}`;
     debug(`Downloading file: ${url}`);

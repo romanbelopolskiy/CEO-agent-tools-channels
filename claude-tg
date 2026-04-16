@@ -1,86 +1,187 @@
 #!/bin/zsh
-# Launch Claude Code with Telegram bot selection
+# Launch Claude Code agent with Telegram bot via shared SSE server
+# Usage: claude-tg [--bot NAME] [--model MODEL] [--effort low|medium|high|max] [claude args...]
+# Auto-detects bot name from directory if ~/agents/<botname>/.mcp.json exists
+# Loads per-agent defaults from .claude-tg.json in the agent directory when present
 
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0")")" && pwd)"
 BOTS_FILE="$HOME/.claude/telegram-bots.json"
+SSE_HOST="http://127.0.0.1:3200"
+DEFAULTS_FILE=".claude-tg.json"
 
 # Ensure bots file exists
 if [[ ! -f "$BOTS_FILE" ]]; then
   echo "{}" > "$BOTS_FILE"
 fi
 
-# Parse bot names from JSON
-BOT_NAMES=($(python3 -c "import json; print('\n'.join(json.load(open('$BOTS_FILE')).keys()))" 2>/dev/null))
+BOT_NAMES=($(python3 -c "import json; print('\\n'.join(json.load(open('$BOTS_FILE')).keys()))" 2>/dev/null))
 
-add_bot() {
-  echo ""
-  printf "Bot name (e.g. ceo, support): "
-  read NEW_NAME
-  if [[ -z "$NEW_NAME" ]]; then
-    echo "Name required"
+# Parse launcher args that belong to claude-tg itself
+CLAUDE_ARGS=()
+for arg in "$@"; do
+  if [[ "$prev" == "--bot" ]]; then
+    CLI_BOT="$arg"
+    prev=""
+    continue
+  fi
+  if [[ "$prev" == "--effort" ]]; then
+    CLI_EFFORT="$arg"
+    prev=""
+    continue
+  fi
+  if [[ "$prev" == "--model" ]]; then
+    CLI_MODEL="$arg"
+    prev=""
+    continue
+  fi
+  if [[ "$arg" == "--bot" || "$arg" == "--effort" || "$arg" == "--model" ]]; then
+    prev="$arg"
+    continue
+  fi
+  CLAUDE_ARGS+=("$arg")
+done
+
+# Auto-detect from directory name
+if [[ -z "$CLI_BOT" ]]; then
+  CWD_NAME="$(basename "$(pwd)")"
+  for name in "${BOT_NAMES[@]}"; do
+    if [[ "$name" == "$CWD_NAME" ]]; then
+      CLI_BOT="$CWD_NAME"
+      break
+    fi
+  done
+fi
+
+# Interactive selection if no auto-detect
+if [[ -z "$CLI_BOT" ]]; then
+  if [[ ${#BOT_NAMES[@]} -eq 0 ]]; then
+    echo "No bots configured in $BOTS_FILE"
     exit 1
   fi
-  printf "Bot token (from @BotFather): "
-  read NEW_TOKEN
-  if [[ -z "$NEW_TOKEN" ]]; then
-    echo "Token required"
-    exit 1
-  fi
-  python3 -c "
-import json
-d = json.load(open('$BOTS_FILE'))
-d['$NEW_NAME'] = {'token': '$NEW_TOKEN'}
-json.dump(d, open('$BOTS_FILE', 'w'), indent=2)
-"
-  echo "Bot '$NEW_NAME' saved."
-  SELECTED="$NEW_NAME"
-}
-
-if [[ ${#BOT_NAMES[@]} -eq 0 ]]; then
-  echo "No bots configured. Let's add one."
-  add_bot
-else
   echo "Available bots:"
   for i in {1..${#BOT_NAMES[@]}}; do
     echo "  $i) ${BOT_NAMES[$i]}"
   done
-  next=$((${#BOT_NAMES[@]} + 1))
-  echo "  $next) + Add new bot"
   echo ""
   printf "Select bot [1]: "
   read choice
   choice=${choice:-1}
-
-  if [[ "$choice" -eq "$next" ]]; then
-    add_bot
-  else
-    SELECTED="${BOT_NAMES[$choice]}"
-  fi
+  CLI_BOT="${BOT_NAMES[$choice]}"
 fi
 
-if [[ -z "$SELECTED" ]]; then
+if [[ -z "$CLI_BOT" ]]; then
   echo "Invalid selection"
   exit 1
 fi
 
-# Write MCP config to temp file (--mcp-config expects a file path)
-MCP_CONFIG_FILE="$(mktemp /tmp/claude-tg-mcp.XXXXXX).json"
-cat > "$MCP_CONFIG_FILE" <<EOF
+AGENT_DIR="$(pwd)"
+AGENT_DEFAULTS_PATH="$AGENT_DIR/$DEFAULTS_FILE"
+
+# Load per-agent defaults if present
+if [[ -f "$AGENT_DEFAULTS_PATH" ]]; then
+  DEFAULT_MODEL=$(python3 - <<PY 2>/dev/null
+import json
+try:
+    data=json.load(open('$AGENT_DEFAULTS_PATH'))
+    print(data.get('model',''))
+except Exception:
+    print('')
+PY
+)
+  DEFAULT_EFFORT=$(python3 - <<PY 2>/dev/null
+import json
+try:
+    data=json.load(open('$AGENT_DEFAULTS_PATH'))
+    print(data.get('effort',''))
+except Exception:
+    print('')
+PY
+)
+fi
+
+if [[ -z "$CLI_MODEL" && -n "$DEFAULT_MODEL" ]]; then
+  CLI_MODEL="$DEFAULT_MODEL"
+fi
+if [[ -z "$CLI_EFFORT" && -n "$DEFAULT_EFFORT" ]]; then
+  CLI_EFFORT="$DEFAULT_EFFORT"
+fi
+
+# Interactive model selection if not provided and no defaults file value
+if [[ -z "$CLI_MODEL" ]]; then
+  echo ""
+  echo "Select model:"
+  echo "  1) sonnet"
+  echo "  2) opus"
+  printf "Select model [1]: "
+  read model_choice
+  model_choice=${model_choice:-1}
+  case "$model_choice" in
+    1) CLI_MODEL="sonnet" ;;
+    2) CLI_MODEL="opus" ;;
+    sonnet|opus) CLI_MODEL="$model_choice" ;;
+    *) CLI_MODEL="sonnet" ;;
+  esac
+fi
+
+case "$CLI_MODEL" in
+  sonnet|opus) ;;
+  *)
+    echo "Invalid model: $CLI_MODEL"
+    echo "Use one of: sonnet, opus"
+    exit 1
+    ;;
+esac
+
+# Interactive effort selection if not provided and no defaults file value
+if [[ -z "$CLI_EFFORT" ]]; then
+  echo ""
+  echo "Select effort:"
+  echo "  1) low"
+  echo "  2) medium"
+  echo "  3) high"
+  echo "  4) max"
+  printf "Select effort [2]: "
+  read effort_choice
+  effort_choice=${effort_choice:-2}
+  case "$effort_choice" in
+    1) CLI_EFFORT="low" ;;
+    2) CLI_EFFORT="medium" ;;
+    3) CLI_EFFORT="high" ;;
+    4) CLI_EFFORT="max" ;;
+    low|medium|high|max) CLI_EFFORT="$effort_choice" ;;
+    *) CLI_EFFORT="medium" ;;
+  esac
+fi
+
+case "$CLI_EFFORT" in
+  low|medium|high|max) ;;
+  *)
+    echo "Invalid effort: $CLI_EFFORT"
+    echo "Use one of: low, medium, high, max"
+    exit 1
+    ;;
+esac
+
+# Check SSE server
+if ! curl -sf "$SSE_HOST/health" >/dev/null 2>&1; then
+  echo "ERROR: SSE server not running at $SSE_HOST"
+  echo "Start: launchctl load ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist"
+  exit 1
+fi
+
+# Ensure agent has .mcp.json with SSE URL
+AGENT_MCP="$AGENT_DIR/.mcp.json"
+if [[ ! -f "$AGENT_MCP" ]] || ! grep -q "3200" "$AGENT_MCP" 2>/dev/null; then
+  echo "Writing SSE config to $AGENT_MCP"
+  cat > "$AGENT_MCP" <<EOF
 {
   "mcpServers": {
     "ceo-agent-tools-channels": {
-      "command": "node",
-      "args": ["${SCRIPT_DIR}/dist/index.js"],
-      "env": {
-        "TELEGRAM_BOT_NAME": "${SELECTED}",
-        "DEBUG": "0"
-      }
+      "url": "${SSE_HOST}/sse?bot=${CLI_BOT}"
     }
   }
 }
 EOF
+fi
 
-trap "rm -f '$MCP_CONFIG_FILE' '${MCP_CONFIG_FILE%.json}'" EXIT
-
-echo "Starting Claude Code with bot: $SELECTED"
-claude --mcp-config "$MCP_CONFIG_FILE" --dangerously-load-development-channels server:ceo-agent-tools-channels "$@"
+echo "Starting Claude Code with bot: $CLI_BOT (SSE: $SSE_HOST, model: $CLI_MODEL, effort: $CLI_EFFORT)"
+claude --dangerously-load-development-channels server:ceo-agent-tools-channels --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}"

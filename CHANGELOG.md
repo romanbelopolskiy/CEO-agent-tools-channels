@@ -4,6 +4,80 @@ All notable changes to this project are documented here.
 
 ---
 
+## [3.0.0] — 2026-04-16
+
+### Added
+
+#### Live status messages (spec: ceo-tools-telegram-live-status-tz.md)
+- **One editable status message per task** — when a user sends a task to an agent, the bot creates a single status message in Telegram and edits it on every runtime event instead of spamming new messages.
+- **`editMessageText` in telegram.ts** — new Telegram API method wired into the existing client.
+- **`src/status-messages.ts`** — new module with:
+  - `StatusManager` class: task lifecycle (create / update / finalize), in-memory state per taskId.
+  - `renderStatus()` function: event → human-readable status card (emoji + agent + model + step + details).
+  - Edit throttling: 1s debounce, text dedupe, forced flush on terminal events.
+  - GC for finished tasks (>10 min auto-cleanup).
+  - `loadTelemetryConfig()`: reads `~/agents/<agent>/.claude-tg.json` for per-agent verbosity.
+- **Three verbosity modes** configurable via `telegramTelemetry` in `.claude-tg.json`:
+  - `silent` — no status message.
+  - `status` (default) — key state changes only (started, thinking, command, tool, error, finished).
+  - `verbose` — all events including tool finished, command exit codes, thinking updates.
+- **Supported events**: task_started, thinking_started/updated/finished, command_started/finished, tool_started/finished, permission_request, api_error, retrying, task_finished, task_failed.
+- **Tool call tracking** — any MCP tool call with a `chat_id` arg emits `tool_started` to the status message.
+- **Auto-finalize** — when agent calls `send_telegram_message`, the status message is finalized with `✅ Готово`.
+
+### Per-agent config
+
+New optional file `~/agents/<agent>/.claude-tg.json`:
+
+```json
+{
+  "model": "opus",
+  "effort": "max",
+  "telegramTelemetry": "status"
+}
+```
+
+---
+
+## [2.0.0] — 2026-04-09
+
+### Breaking changes
+
+- **SSE transport mode** — the server now runs as a shared SSE service (`TRANSPORT=sse PORT=3200`). One instance serves all Claude Code sessions instead of spawning per-session processes via stdio. Stdio mode is still supported for backward compatibility.
+- **MCP config format changed** — agent `.mcp.json` now uses `"type": "sse"` + `"url"` instead of `"command"` + `"args"`.
+- **`claude-tg` no longer generates temp MCP configs** — it auto-detects the bot name from the directory and uses the agent's own `.mcp.json`.
+
+### Added
+
+#### SSE server with per-bot routing
+- `GET /sse?bot=NAME` — each agent connects with its bot name, receives only its messages
+- `GET /sse` (no filter) — receives messages from all bots
+- `GET /health` — JSON status: connected sessions, bot list, active typing indicators
+- `POST /messages?sessionId=xxx` — MCP message forwarding
+
+#### Typing indicator
+When a Telegram message is routed to an agent, the server sends `sendChatAction("typing")` every 4 seconds. Stops when the agent replies via `send_telegram_message` or after 2-minute timeout.
+
+#### Token deduplication
+Bots sharing the same Telegram token (e.g., `post`/`smm` are aliases) are polled only once. Messages are delivered to all sessions registered for any alias. Prevents Telegram 409 Conflict errors.
+
+#### `claude-tg` auto-detect
+- `--bot NAME` flag for non-interactive use
+- Auto-detects bot name from current directory (`~/agents/devops/` → bot `devops`)
+- Health check before launch — fails fast if SSE server is down
+- Writes `.mcp.json` with SSE URL if missing
+
+#### launchd service
+- `com.ceo-agent-tools.channels-sse.plist` — auto-start + keepalive for macOS
+
+### Changed
+
+- `telegram.ts` — added `sendChatAction()` method
+- `tools.ts` — `registerTools()` accepts `onMessageSent` callback (stops typing on reply)
+- `index.ts` — full rewrite: HTTP server, session management, shared polling, routing
+
+---
+
 ## [1.3.0] — 2026-03-31
 
 ### Added

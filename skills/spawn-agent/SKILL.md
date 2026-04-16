@@ -181,33 +181,41 @@ Do not log internal tool calls or intermediate steps, only the user-facing reque
 
 ### Шаг 6 — Создать MCP-конфиг
 
+Создать `.mcp.json` в папке агента (подключение к shared SSE серверу):
+
 ```bash
-cat > /tmp/claude-tg-mcp.{NAME}.json << 'EOF'
+cat > /Users/romanbelopolskiy/agents/{NAME}/.mcp.json << 'EOF'
 {
   "mcpServers": {
     "ceo-agent-tools-channels": {
-      "command": "node",
-      "args": ["/Users/romanbelopolskiy/CEO-agent-tools-channels/dist/index.js"],
-      "env": {
-        "TELEGRAM_BOT_NAME": "{BOT_NAME}",
-        "DEBUG": "0"
-      }
+      "type": "sse",
+      "url": "http://127.0.0.1:3200/sse?bot={BOT_NAME}"
     }
   }
 }
 EOF
 ```
 
-> ⚠️ MCP-конфиги в /tmp/ не переживают перезагрузку. Для постоянства можно положить в `~/.claude/mcp-configs/{NAME}.json` и в tmux-запуске ссылаться на этот путь.
+> SSE сервер (`com.ceo-agent-tools.channels-sse`) должен быть запущен на порту 3200.
+> Проверить: `curl http://127.0.0.1:3200/health`
 
-### Шаг 7 — Запустить в tmux
+### Шаг 7 — Перезапустить SSE сервер (чтобы подхватить нового бота)
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
+launchctl load ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
+```
+
+### Шаг 8 — Запустить в tmux
 
 ```bash
 tmux new-session -d -s {NAME} -x 220 -y 50
-tmux send-keys -t {NAME}:0 "cd /Users/romanbelopolskiy/agents/{NAME} && claude --mcp-config /tmp/claude-tg-mcp.{NAME}.json --dangerously-load-development-channels server:ceo-agent-tools-channels" Enter
+tmux send-keys -t {NAME}:0 "cd /Users/romanbelopolskiy/agents/{NAME} && ~/CEO-agent-tools-channels/claude-tg" Enter
 ```
 
-### Шаг 8 — Обновить архитектурный документ
+`claude-tg` автоматически определит бота по имени директории.
+
+### Шаг 9 — Обновить архитектурный документ
 
 Открыть и добавить секцию нового агента:
 `/Users/romanbelopolskiy/.openclaw/workspace/Obsidian-Networking-KB/95 Agents/agent-factory-architecture.md`
@@ -231,7 +239,7 @@ tmux send-keys -t {NAME}:0 "cd /Users/romanbelopolskiy/agents/{NAME} && claude -
 Обновить таблицу Cron-задач если нужно.
 Обновить дату: `Последнее обновление: YYYY-MM-DD`.
 
-### Шаг 9 — Отчёт Roman
+### Шаг 10 — Отчёт Roman
 
 Отправить итог:
 ```
@@ -257,8 +265,9 @@ tmux send-keys -t {NAME}:0 "cd /Users/romanbelopolskiy/agents/{NAME} && claude -
 - [ ] `~/agents/{NAME}/` создана со всеми папками (logs, state, .claude/skills)
 - [ ] `.claude/settings.json` — bypassPermissions, все разрешения
 - [ ] `CLAUDE.md` — написан под конкретную задачу агента
-- [ ] MCP-конфиг `/tmp/claude-tg-mcp.{NAME}.json` создан
-- [ ] tmux-сессия запущена
+- [ ] `.mcp.json` с SSE URL (`?bot={NAME}`) создан в папке агента
+- [ ] SSE сервер перезапущен (подхватил нового бота)
+- [ ] tmux-сессия запущена через `claude-tg`
 - [ ] Архитектурный документ обновлён
 
 ---
@@ -266,7 +275,8 @@ tmux send-keys -t {NAME}:0 "cd /Users/romanbelopolskiy/agents/{NAME} && claude -
 ## Заметки
 
 - **Один бот = одна tmux-сессия** — не запускать несколько агентов в одной сессии
-- **BOT_NAME в telegram-bots.json** должен совпадать с `TELEGRAM_BOT_NAME` в MCP-конфиге
-- **MCP-конфиг в /tmp/** — не переживает ребут. Для постоянства копировать в `~/.claude/mcp-configs/`
+- **BOT_NAME в telegram-bots.json** должен совпадать с `?bot=` параметром в `.mcp.json`
+- **SSE сервер** — один shared инстанс на порту 3200, launchd `com.ceo-agent-tools.channels-sse`
+- **Typing indicator** — автоматически отправляется пока агент обрабатывает сообщение
 - **Логи** — каждый агент пишет в свою папку, новый день = новый файл
 - **CLAUDE.md** — пиши конкретно под задачу, не копируй шаблон буквально
