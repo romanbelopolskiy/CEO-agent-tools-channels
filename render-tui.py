@@ -9,6 +9,8 @@ import pyte
 HRULE_RE = re.compile(r"^─+$")
 USER_MSG_RE = re.compile(r"←\s+ceo-agent-tools-channels:")
 COUNTER_RE = re.compile(r"\(\d+m\s*\d*s\s*·[^)]*\)")
+MODEL_BANNER_RE = re.compile(r"^(Opus|Sonnet|Haiku)\s+\d+\.\d+\s+(with|·)")
+LOGO_CHARS = set("▐▛█▜▌▝▘ ")
 
 
 def is_chrome(line: str) -> bool:
@@ -20,6 +22,35 @@ def is_chrome(line: str) -> bool:
     if s.startswith("❯"):
         return True
     if "bypass permissions" in s:
+        return True
+    # Startup banner: logo art (lines whose non-whitespace chars are only box-drawing)
+    if s and set(s) - LOGO_CHARS == set():
+        return True
+    # Startup banner: version header
+    if s.startswith("Claude Code v"):
+        return True
+    # Startup banner: welcome line
+    if s.startswith("Welcome to "):
+        return True
+    # Startup banner: channel listener warning
+    if "Listening for channel messages" in s:
+        return True
+    # Startup banner: dangerously-load-development-channels warning
+    if "Experimental · inbound" in s:
+        return True
+    if "Restart Claude Code without" in s:
+        return True
+    # Startup banner: keyboard hint footer (standalone line starting with "(ctrl+")
+    if s.startswith("(ctrl+"):
+        return True
+    # Tip hints — the ⎿ prefix is followed by a non-breaking space before "Tip:"
+    # Match "⎿ …Tip:" in any spacing variant, or bare "Tip:" lines
+    if s.startswith("⎿") and "Tip:" in s:
+        return True
+    if s.startswith("Tip:"):
+        return True
+    # Model/effort banner: "Opus 4.7 with max effort · Claude Max"
+    if MODEL_BANNER_RE.match(s):
         return True
     return False
 

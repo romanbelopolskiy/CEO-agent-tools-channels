@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ---
 
+## v3.1.5 — 2026-04-17
+
+### Fixed
+
+- **Strip Claude Code startup banner from live status stream** — logo art, model/effort line (`"Opus 4.7 with max effort · Claude Max"`), experimental channel warning, `(ctrl+b…)` footer hint, and tip lines no longer leak into Telegram status messages. Extended `is_chrome()` in `render-tui.py` with seven new patterns: logo box-drawing char check, `"Claude Code v"` prefix, `"Welcome to "` prefix, `"Listening for channel messages"` substring, `"Experimental · inbound"` substring, `"Restart Claude Code without"` substring, `"(ctrl+"` line prefix, `"⎿  Tip:"`/`"Tip:"` stripped-prefix, and a `MODEL_BANNER_RE` regex for model/effort header lines. (`render-tui.py`)
+
+---
+
 ## v3.1.4 — 2026-04-16
 
 ### Changed

@@ -340,7 +340,23 @@ When the operator sends `stop`, `стоп`, `esc`, `escape`, or `/stop` in Teleg
 
 **Chrome filtering (`is_chrome`):**
 
-Strips decorative UI chrome: empty lines, horizontal rules (`─`), `❯` prompt prefix, and lines containing `"bypass permissions"` (the claude permission footer). The filter previously also required `"shift+tab"` to match — but newer claude CLI versions dropped `shift+tab` from the footer, so lines were no longer filtered. Fixed in v3.1.0: match `"bypass permissions"` alone. Also changed from a trailing-only `pop()` loop to a full-pass list comprehension `[l for l in lines if not is_chrome(l)]`, catching chrome lines anywhere in the buffer.
+Strips decorative UI chrome. Current filter list (v3.1.5):
+
+- Empty lines
+- Horizontal rules (`─`)
+- `❯` prompt prefix
+- `"bypass permissions"` substring (permission footer)
+- Logo art lines — non-whitespace chars are a subset of `▐▛█▜▌▝▘ ` (box-drawing only)
+- `"Claude Code v"` prefix (version header)
+- `"Welcome to "` prefix (startup welcome)
+- `"Listening for channel messages"` substring (channel warning)
+- `"Experimental · inbound"` substring (dangerously-load-development-channels warning)
+- `"Restart Claude Code without"` substring (continuation of channel warning)
+- `"(ctrl+"` line prefix (keyboard hint footer)
+- `"⎿  Tip:"` or `"Tip:"` stripped-prefix (tip hints)
+- Model/effort banner matching `MODEL_BANNER_RE`: `^(Opus|Sonnet|Haiku)\s+\d+\.\d+\s+(with|·)` (e.g. "Opus 4.7 with max effort · Claude Max")
+
+Changed from a trailing-only `pop()` loop to a full-pass list comprehension `[l for l in lines if not is_chrome(l)]`, catching chrome lines anywhere in the buffer (v3.1.0).
 
 **Stable hash for idle-thinking:**
 
@@ -362,11 +378,13 @@ The claude progress line contains a live timer and token counter (`(1m 19s · �
 | `/stop` ENOENT on launchd | Homebrew not on launchd PATH | Add `/opt/homebrew/bin` to `EnvironmentVariables.PATH` in the launchd plist (see Setup in README). |
 | Status flickers every second | Old render-tui.py without counter normalization | Update to v3.1.0 `render-tui.py`. |
 | Status goes to old message after /stop | Old `findTaskByChatId` returning first task | Update to v3.1.0 `status-messages.ts`. |
+| Startup banner leaks into status (logo, model, tips) | Claude CLI emits `ESC[2J ESC[H` + full banner redraw mid-task (on every tool-call cycle start). pyte replays the full screen, leaving the banner as the top of the visible buffer until new content overwrites it. | Update to v3.1.5 `render-tui.py` — `is_chrome()` now filters all banner patterns. |
 
 ## Version history
 
 See `CHANGELOG.md` for full details.
 
+- **v3.1.5** (2026-04-17) — Strip Claude CLI startup banner from live status: logo, model/effort line, experimental warning, tip hints filtered by `is_chrome()`.
 - **v3.1.4** (2026-04-16) — Simple state machine: status streams between user message and reply, freezes on reply. Removed auto-create and cooldown heuristics.
 - **v3.1.0** (2026-04-16) — Reliable `/stop` via tmux send-keys, stable live status (counter normalization, chrome detection fix), `findTaskByChatId` most-recent semantics, `tryHandleStop` finalizes task + stops typing.
 - **v3.0.0** (2026-04-16) — Live status messages, editMessageText, StatusManager, per-agent config, shared logger + constants.
