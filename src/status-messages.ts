@@ -80,82 +80,13 @@ function truncate(s: string, max: number): string {
 
 export function renderStatus(
   event: AgentRuntimeEvent,
-  state: TaskStatusState
+  _state: TaskStatusState
 ): string {
-  const agent = `Агент: ${state.botName}`;
-  const meta = [agent];
-  if (state.model) meta.push(`Модель: ${state.model}`);
-  if (state.effort) meta.push(`Effort: ${state.effort}`);
-  const metaBlock = meta.join("\n");
-
   switch (event.type) {
-    case "task_started":
-      return `⏳ Задача принята\n\n${metaBlock}\nШаг: подготавливаю выполнение`;
-
-    case "thinking_started":
-    case "thinking_updated":
-      return `🧠 Анализирую задачу\n\n${metaBlock}\nШаг: строю план действий`;
-
-    case "thinking_finished":
-      return `🧠 Анализ завершён\n\n${metaBlock}\nШаг: готов к выполнению`;
-
-    case "command_started":
-      return (
-        `🛠 Выполняю команду\n\n${agent}\nШаг: shell command` +
-        (event.command
-          ? `\nКоманда:\n\`${truncate(event.command, 200)}\``
-          : "")
-      );
-
-    case "command_finished":
-      return (
-        `🛠 Команда завершена\n\n${agent}\nШаг: shell command` +
-        (event.command
-          ? `\nКоманда: \`${truncate(event.command, 120)}\``
-          : "") +
-        (event.exitCode !== undefined ? `\nExit code: ${event.exitCode}` : "")
-      );
-
-    case "tool_started":
-      return (
-        `🔧 Tool: \`${event.tool || "unknown"}\`\n\n${agent}` +
-        (event.preview ? `\n${truncate(event.preview, 300)}` : "")
-      );
-
-    case "tool_finished":
-      return (
-        `🔧 Tool завершён\n\n${agent}` +
-        (event.tool ? `\nTool: \`${event.tool}\`` : "") +
-        (event.ok === false ? `\n⚠️ Tool вернул ошибку` : "")
-      );
-
-    case "permission_request":
-      return `🔐 Запрос разрешения\n\n${agent}\n${event.description || ""}`;
-
-    case "api_error":
-      return (
-        `⚠️ Ошибка выполнения\n\n${agent}\nШаг: Claude API` +
-        (event.message ? `\nОшибка: ${truncate(event.message, 200)}` : "") +
-        (event.requestId ? `\nRequest ID: ${event.requestId}` : "")
-      );
-
-    case "retrying":
-      return (
-        `🔄 Повторяю запрос\n\n${agent}` +
-        (event.reason ? `\nПричина: ${truncate(event.reason, 200)}` : "")
-      );
-
-    case "task_finished":
-      return `✅ Готово\n\n${agent}\nШаг: задача завершена`;
-
     case "task_failed":
-      return (
-        `❌ Задача провалилась\n\n${agent}` +
-        (event.error ? `\nОшибка: ${truncate(event.error, 300)}` : "")
-      );
-
+      return event.error ? `\`\`\`\n${truncate(event.error, 3500)}\n\`\`\`` : "⏳";
     default:
-      return `⏳ Выполняю…\n\n${agent}`;
+      return "⏳";
   }
 }
 
@@ -247,13 +178,24 @@ export class StatusManager {
     }
     if (!shouldShow(event, state.mode)) return;
 
-    // Terminal events: flush immediately.
-    if (TERMINAL_EVENTS.has(event.type)) {
+    // task_finished: keep the last CLI frame as-is, just mark done.
+    if (event.type === "task_finished") {
+      this.cancelTimer(event.taskId);
+      state.finishedAt = Date.now();
+      return;
+    }
+
+    // task_failed: render the error, cancel timers.
+    if (event.type === "task_failed") {
       this.cancelTimer(event.taskId);
       this.flushEvent(event, state);
       state.finishedAt = Date.now();
       return;
     }
+
+    // No rendering for non-terminal events — the /status-feed override
+    // (raw CLI stdout) is the source of truth while the task is running.
+    return;
 
     // Otherwise debounce: store the latest event, schedule a flush.
     this.pendingEvents.set(event.taskId, event);
@@ -283,10 +225,13 @@ export class StatusManager {
 
   /** Find an active (non-finished) task by chatId, most recent first. */
   findTaskByChatId(chatId: number): TaskStatusState | undefined {
+    let best: TaskStatusState | undefined;
     for (const [, s] of this.tasks) {
-      if (s.chatId === chatId && !s.finishedAt) return s;
+      if (s.chatId !== chatId) continue;
+      if (s.finishedAt) continue;
+      if (!best || s.startedAt > best.startedAt) best = s;
     }
-    return undefined;
+    return best;
   }
 
   /** Find the most recent active task across all chats.

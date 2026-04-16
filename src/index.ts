@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import http from "node:http";
+import * as fsSync from "node:fs";
+import { execFileSync } from "node:child_process";
 import { URL } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -133,6 +135,37 @@ function createMcpServer(
   };
 
   return server;
+}
+
+// --- Stop command: send ESC to the claude CLI running in tmux ---
+const STOP_PATTERN = /^\s*(stop|стоп|esc|escape|\/stop)\s*$/i;
+
+function tryHandleStop(botName: string, chatId: number, text: string): string | null {
+  if (!STOP_PATTERN.test(text)) return null;
+  try {
+    // Check whether the tmux session exists (non-zero exit = no session)
+    try {
+      execFileSync("tmux", ["has-session", "-t", botName], { timeout: 3000 });
+    } catch {
+      return `❌ No tmux session '${botName}' — claude-tg not running`;
+    }
+    // Send Escape key to cancel the current turn
+    execFileSync("tmux", ["send-keys", "-t", botName, "Escape"], { timeout: 3000 });
+    log(`[${botName}] ESC sent via tmux send-keys`);
+    // Finalize the active task for this chat so the next user message gets a fresh status message
+    if (statusManager) {
+      const task = statusManager.findTaskByChatId(chatId);
+      if (task) {
+        statusManager.finishTask(task.taskId);
+        log(`[${botName}] finalized task ${task.taskId} on stop`);
+      }
+    }
+    // Stop the typing indicator from the interrupted turn
+    stopTyping(botName, chatId);
+    return "🛑 Interrupted (ESC sent to claude via tmux)";
+  } catch (err: any) {
+    return `❌ Stop failed: ${err.message}`;
+  }
 }
 
 // --- Get all bot names that share a token with the given bot ---
@@ -509,6 +542,12 @@ function startPolling(
               continue;
             }
 
+            const stopReply = tryHandleStop(botName, msg.chat.id, text);
+            if (stopReply) {
+              await telegram.sendMessage(msg.chat.id, stopReply);
+              continue;
+            }
+
             log(`[${botName}] Group msg from @${msg.from!.username || msg.from!.first_name} in "${msg.chat.title || msg.chat.id}"`);
 
             if (mode === "stdio" && stdioServer) {
@@ -548,6 +587,12 @@ function startPolling(
               log(`[${botName}] Pairing code "${code}" for user ${userId}`);
               await telegram.sendMessage(msg.chat.id, `\`pair code ${code}\``);
             }
+            continue;
+          }
+
+          const stopReply = tryHandleStop(botName, msg.chat.id, text);
+          if (stopReply) {
+            await telegram.sendMessage(msg.chat.id, stopReply);
             continue;
           }
 

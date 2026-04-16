@@ -116,6 +116,23 @@ Or use `claude-tg --bot devops` from any directory.
 
 **Alternative: Interactive mode** — run `claude-tg` and pick a bot from the list.
 
+> **tmux requirement for `/stop`:** `claude-tg` must run inside a tmux session whose name matches the bot name (e.g. `tmux new-session -s devops`). The `/stop` command sends ESC via `tmux send-keys` — it has no effect if there is no matching tmux session.
+
+#### launchd PATH requirement (macOS Apple Silicon)
+
+If you run the SSE server via launchd, add `/opt/homebrew/bin` to `EnvironmentVariables` in your plist (`~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist`). launchd's default PATH does not include Homebrew, so `tmux` (needed for `/stop`) is not resolvable without it:
+
+```xml
+<key>EnvironmentVariables</key>
+<dict>
+  <key>PATH</key>
+  <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  <!-- other vars -->
+</dict>
+```
+
+Without this fix, `/stop` fails with `ENOENT` when trying to call `tmux`.
+
 ### 5. Authorize your Telegram account
 
 There are two ways to authorize yourself:
@@ -281,6 +298,23 @@ Send a message to a Telegram chat.
 |---|---|---|
 | `chat_id` | number | Chat ID (from channel event metadata) |
 | `text` | string | Message text (Markdown) |
+
+### `/stop` command (user-initiated, not a tool)
+
+Send any of the following patterns to your bot in Telegram to interrupt the current agent turn:
+
+```
+stop   стоп   esc   escape   /stop
+```
+
+**How it works:** the server sends `tmux send-keys -t <botName> Escape`, which emulates the ESC keypress in the running claude CLI — genuinely cancelling the current turn. It also finalizes the active status message and stops the "typing…" indicator immediately.
+
+**Constraints:**
+- `claude-tg` must be running inside a tmux session named after the bot (e.g. session `devops` for bot `devops`).
+- If the session doesn't exist, the bot replies: "No tmux session '<botName>' — claude-tg not running".
+- launchd plist must include `/opt/homebrew/bin` on PATH (see Setup, step 5).
+
+**For agents:** do NOT call `/stop` programmatically. This is a human interrupt — only the operator should send it from Telegram.
 
 ### `telegram_access`
 
@@ -453,6 +487,18 @@ Set `DEBUG=0` or remove the `DEBUG` env var. Non-debug logs (`[telegram-mcp]`) a
 **SSE mode:** The server runs persistently via launchd. Individual sessions are cleaned up when the client disconnects. The server itself only stops on `SIGINT`/`SIGTERM`.
 
 **Stdio mode:** The MCP server exits when Claude Code closes stdin or on `SIGINT`/`SIGTERM`/`SIGHUP`.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `/stop` returns "No tmux session" | Run `tmux ls` and verify a session named after your bot exists. If you launch via a script outside tmux, wrap it: `tmux new-session -s <botName> "cd ~/agents/<botName> && claude-tg"`. |
+| `/stop` fails with ENOENT on launchd | launchd PATH does not include Homebrew. Add `/opt/homebrew/bin` to `EnvironmentVariables` in your plist (see Setup, step 5). |
+| Status message flickers every second while agent is thinking | Upgrade to v3.1.0 — `render-tui.py` now normalizes the progress counter so the hash stays stable between ticks. |
+| Status updates go to an old message after `/stop` and a new task | Upgrade to v3.1.0 — `StatusManager.findTaskByChatId` now returns the most-recent active task instead of the oldest. |
+| Agent can't connect | SSE server not running. Run `curl http://127.0.0.1:3200/health`. If down, restart. |
+| Messages not arriving | Wrong bot name in `.mcp.json` or polling error. Check stderr logs for `[botname] Polling error`. |
+| "typing..." indicator stuck | Will auto-stop after 2 min. Or restart server. With v3.1.0, `/stop` also calls `stopTyping` immediately. |
 
 ## Skills
 

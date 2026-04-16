@@ -73,6 +73,9 @@ if [[ -z "$CLI_BOT" ]]; then
   exit 1
 fi
 
+# Clean up any orphaned status-watcher from a previous crashed session
+pkill -f "status-watcher\.sh.*${CLI_BOT}" 2>/dev/null
+
 AGENT_DIR="$(pwd)"
 AGENT_DEFAULTS_PATH="$AGENT_DIR/$DEFAULTS_FILE"
 

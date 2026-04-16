@@ -4,6 +4,29 @@ All notable changes to this project are documented here.
 
 ---
 
+## [3.1.0] — 2026-04-16
+
+### Added
+
+- **`/stop` via tmux send-keys** — `/stop` (also: `stop`, `стоп`, `esc`, `escape`) now sends the ESC key directly to the claude CLI via `tmux send-keys -t <botName> Escape`. This genuinely cancels the current turn. Requires `claude-tg` to run inside a tmux session named after the bot. (`src/index.ts`)
+- **Stale status-watcher cleanup on startup** — `claude-tg` now runs `pkill -f "status-watcher.sh.*<botName>"` at startup to kill orphaned watchers from crashed previous sessions. Previously, orphan watchers with PPID=1 kept POSTing to `/status-feed`, competing with the new watcher. (`claude-tg`)
+- **`render-tui.py`** — new utility: renders a `script(1)` TTY capture to plain text via pyte VT100 emulation, strips chrome decorations, and normalizes the progress counter so the hash stays stable. Used by the live status pipeline.
+
+### Changed
+
+- **`tryHandleStop` now finalizes the task and stops typing** — signature changed to `(botName, chatId, text)`. On successful ESC send: calls `statusManager.finishTask(taskId)` so the interrupted task is marked done, and calls `stopTyping(botName, chatId)` so the Telegram "typing…" indicator stops immediately. (`src/index.ts`)
+- **`StatusManager.findTaskByChatId` returns most-recent active task** — previously returned the first (insertion-order) active task for a chat. After `/stop`, the old unfinalized task would intercept status updates for the next task. Now scans all active tasks for the chat and returns the one with the highest `startedAt`. (`src/status-messages.ts`)
+- **`renderStatus` tool_started template** — now shows `🔧 Tool: \`<name>\`` with an optional preview truncated to 300 chars, replacing the previous generic "Вызываю tool" card. (`src/status-messages.ts`)
+- **Logger and constants extracted** — `log()`/`debug()` moved to `src/logger.ts`; magic numbers (`TYPING_INTERVAL_MS`, `TYPING_TIMEOUT_MS`, `STATUS_DEBOUNCE_MS`, etc.) moved to `src/constants.ts`. Both `index.ts` and `status-messages.ts` now import from these shared modules. (`src/index.ts`, `src/status-messages.ts`)
+
+### Fixed
+
+- **Removed PID-file sidecar from `claude-tg`** — the old `PID_WRITER` loop used `pgrep` to find the claude grandchild PID and wrote it to `/tmp/claude-tg-<bot>.pid` so the stop handler could send SIGINT. No longer needed: `/stop` uses tmux. The PID file, its creation loop, and the trap cleanup are removed. (`claude-tg`)
+- **`render-tui.py` chrome detection for current claude CLI** — `is_chrome()` previously required both `"bypass permissions"` AND `"shift+tab"` to match the footer. Newer claude CLI versions dropped `shift+tab`, so the detector stopped filtering chrome lines, leaving decorative dash rules and `❯` prompts in the output. Fixed: match `"bypass permissions"` alone. Also changed filter from trailing-only `pop()` loop to a full-pass list comprehension, catching chrome lines anywhere in the buffer. (`render-tui.py`)
+- **`render-tui.py` stable hash for idle-thinking** — the progress line `✳ Tinkering… (1m 19s · ↓ 2.3k tokens · thinking with max effort)` has a live timer and token counter that changed every second, causing the hash to change each tick and the Telegram status message to be edited continuously ("endless flicker"). Fixed: `COUNTER_RE` pattern normalizes the parenthetical to `(…)` before hashing, so the hash stays stable during idle reasoning. (`render-tui.py`)
+
+---
+
 ## [3.0.0] — 2026-04-16
 
 ### Added

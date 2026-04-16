@@ -40,7 +40,9 @@ CEO-agent-tools-channels/
 │   └── constants.ts        # All magic numbers (intervals, timeouts, ports)
 ├── dist/                   # Compiled JS (tsc output). This is what runs.
 ├── claude-tg               # Shell launcher: picks bot, model, effort, starts Claude Code
-├── package.json            # v3.0.0, deps: @modelcontextprotocol/sdk
+├── status-watcher.sh       # Background watcher: tails script(1) log, POSTs to /status-feed
+├── render-tui.py           # Renders TTY capture to plain text (pyte), strips chrome, normalizes counters
+├── package.json            # v3.1.0, deps: @modelcontextprotocol/sdk
 ├── tsconfig.json           # ES2022 + Node16 module resolution
 ├── CHANGELOG.md            # Version history
 └── ARCHITECTURE.md         # This file
@@ -166,9 +168,10 @@ cd ~/agents/fullstack
 
 **Key functions:**
 - `initBots(config)` — creates `TelegramClient` per unique token, `BotContext` per bot name, dedupes polling.
-- `startPolling(server, botsMap, runtime, ...)` — infinite loop per bot: `getUpdates()` → access check → media enrichment → `routeToSessions()` or `emitChannelMessage()`.
+- `startPolling(server, botsMap, runtime, ...)` — infinite loop per bot: `getUpdates()` → access check → media enrichment → `routeToSessions()` or `emitChannelMessage()`. Also intercepts messages matching `STOP_PATTERN` and calls `tryHandleStop` before routing.
 - `routeToSessions(botsMap, botName, msg, ...)` — finds matching SSE sessions by bot name or wildcard, emits channel notification, starts typing, starts live status task.
 - `startTyping()` / `stopTyping()` — `sendChatAction("typing")` every 4s until agent replies or 2min timeout.
+- `tryHandleStop(botName, chatId, text)` — handles `/stop` and equivalent patterns. Sends ESC to the claude CLI via `tmux send-keys -t <botName> Escape`, then finalizes the active task (`statusManager.finishTask`) and stops the typing indicator (`stopTyping`). Returns `null` if the message is not a stop command.
 - `enrichMedia()` — downloads photos/documents to `/tmp/`, prepends metadata to message text.
 
 **Where things break:** if the SSE server process dies, ALL agents lose their channel. Check `tmux ls` and `curl :3200/health`. If polling errors accumulate, the bot may lag — check stderr / MCP_LOG_FILE.
@@ -205,7 +208,8 @@ Three tools exposed to Claude Code agents:
   - `startTask(opts)` → sends initial "⏳ Задача принята" message, stores `statusMessageId`.
   - `emitEvent(event)` → debounced `editMessageText` with rendered status.
   - `finishTask(taskId)` / `failTask(taskId, error)` → immediate final edit.
-  - `findTaskByChatId(chatId)` → lookup for tool handlers that need the taskId.
+  - `findTaskByChatId(chatId)` → returns the **most-recent** active task for that chat (highest `startedAt`). Previously returned the first/oldest active task, which caused status updates after `/stop` to target the old interrupted task instead of the new one.
+  - `findMostRecentActiveTask()` → fallback for tool calls that don't carry `chat_id`.
   - `gc()` → cleanup finished tasks older than 10 min.
 
 **`renderStatus(event, state)`** — pure function: event type → emoji + text card. Each event type has its own template.
@@ -306,23 +310,56 @@ Edit `renderStatus()` in `src/status-messages.ts`. It's a pure function — take
 2. Restart the MCP server.
 3. In the agent directory: `~/CEO-agent-tools-channels/claude-tg --bot newbot`.
 
+## Stop handling
+
+When the operator sends `stop`, `стоп`, `esc`, `escape`, or `/stop` in Telegram, the message is intercepted before it reaches Claude Code.
+
+**Mechanism (`tryHandleStop` in `src/index.ts`):**
+
+1. `execFileSync("tmux", ["has-session", "-t", botName])` — verify the session exists.
+2. If not found → reply "No tmux session 'botName' — claude-tg not running" and return.
+3. `execFileSync("tmux", ["send-keys", "-t", botName, "Escape"])` — emulates the ESC keypress in the running claude CLI, which cancels the current turn.
+4. `statusManager.finishTask(task.taskId)` — marks the interrupted task as done so the next task gets a fresh status message.
+5. `stopTyping(botName, chatId)` — clears the Telegram "typing…" indicator immediately rather than waiting for the 2-minute auto-timeout.
+
+**Constraints:**
+- `claude-tg` must run inside a tmux session named exactly after the bot (e.g. `tmux new-session -s devops`).
+- On macOS with launchd, the plist's `EnvironmentVariables.PATH` must include `/opt/homebrew/bin`. launchd's default PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) does not include Homebrew, so `execFileSync("tmux", ...)` fails with `ENOENT` without this fix.
+
+## render-tui.py — live status CLI renderer
+
+`render-tui.py` renders a `script(1)` TTY capture file to plain text. Used by `status-watcher.sh` to extract the visible claude CLI output for POSTing to `/status-feed`.
+
+**Chrome filtering (`is_chrome`):**
+
+Strips decorative UI chrome: empty lines, horizontal rules (`─`), `❯` prompt prefix, and lines containing `"bypass permissions"` (the claude permission footer). The filter previously also required `"shift+tab"` to match — but newer claude CLI versions dropped `shift+tab` from the footer, so lines were no longer filtered. Fixed in v3.1.0: match `"bypass permissions"` alone. Also changed from a trailing-only `pop()` loop to a full-pass list comprehension `[l for l in lines if not is_chrome(l)]`, catching chrome lines anywhere in the buffer.
+
+**Stable hash for idle-thinking:**
+
+The claude progress line contains a live timer and token counter (`(1m 19s · ↓ 2.3k tokens · thinking with max effort)`). Without normalization this changes every second, causing `status-watcher.sh` to post every tick and Telegram to show continuous edits. `COUNTER_RE = re.compile(r"\(\d+m\s*\d*s\s*·[^)]*\)")` substitutes the parenthetical with `(…)` before hashing. The hash stays stable between ticks during idle reasoning, so `/status-feed` POSTs are skipped until content actually changes.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Agent can't connect | SSE server not running | `curl :3200/health`. If down, restart. |
 | Messages not arriving | Bot polling error or wrong bot name | Check stderr logs for `[botname] Polling error`. Verify `.mcp.json` has correct `?bot=NAME`. |
-| "typing..." indicator stuck | `stopTyping` not called (agent crashed?) | Will auto-stop after 2 min. Or restart server. |
+| "typing..." indicator stuck | `stopTyping` not called (agent crashed?) | Will auto-stop after 2 min. Or restart server. With v3.1.0, `/stop` also calls `stopTyping` immediately. |
 | Status message not appearing | `telegramTelemetry: "silent"` in `.claude-tg.json` | Change to `"status"` and restart agent session. |
 | Status message not updating | Debounce swallowing fast events | Normal — events within 1s are coalesced. Terminal events always flush. |
 | `npm run build` fails | TypeScript error | Read the error. Usually a missing import or type mismatch. |
 | 400 from Telegram editMessageText | Text unchanged (Telegram rejects no-op edits) | Normal — dedupe in StatusManager prevents this, but if it happens, it's harmless. |
 | High memory usage | Finished tasks not GC'd | Check `gc()` is running. It auto-runs every 60s. |
+| `/stop` returns "No tmux session" | claude-tg not in a tmux session | Run `tmux ls`. Launch via `tmux new-session -s <botName> "cd ~/agents/<botName> && claude-tg"`. |
+| `/stop` ENOENT on launchd | Homebrew not on launchd PATH | Add `/opt/homebrew/bin` to `EnvironmentVariables.PATH` in the launchd plist (see Setup in README). |
+| Status flickers every second | Old render-tui.py without counter normalization | Update to v3.1.0 `render-tui.py`. |
+| Status goes to old message after /stop | Old `findTaskByChatId` returning first task | Update to v3.1.0 `status-messages.ts`. |
 
 ## Version history
 
 See `CHANGELOG.md` for full details.
 
+- **v3.1.0** (2026-04-16) — Reliable `/stop` via tmux send-keys, stable live status (counter normalization, chrome detection fix), `findTaskByChatId` most-recent semantics, `tryHandleStop` finalizes task + stops typing.
 - **v3.0.0** (2026-04-16) — Live status messages, editMessageText, StatusManager, per-agent config, shared logger + constants.
 - **v2.0.0** (2026-04-09) — SSE transport, per-bot routing, typing indicator, token dedup, claude-tg launcher.
 - **v1.3.0** — Group chat support.
