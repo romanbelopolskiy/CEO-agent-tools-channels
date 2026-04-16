@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 ---
 
+## v3.1.4 — 2026-04-16
+
+### Changed
+
+- **Simpler status lifecycle — output streams between user message and agent reply, freezes on reply.** Replaced the auto-create (v3.1.2) and cooldown (v3.1.3) heuristics with an explicit state machine: per `(botName, chatId)`, state is `"streaming"` while a task is active and `"replied"` once the agent sends its reply (via `send_telegram_message`) or `/stop` is handled. The `/status-feed` handler now simply skips updates when no active task exists — no auto-create, no cooldown check. (`src/index.ts`, `src/status-messages.ts`, `src/constants.ts`)
+
+### Removed
+
+- `findLastFinishedTaskByChatId` from `StatusManager` (added in v3.1.3, no longer used).
+- `STATUS_AUTOCREATE_COOLDOWN_MS` constant (added in v3.1.3, no longer used).
+
+---
+
 ## v3.1.3 — 2026-04-16
 
 ### Fixed

@@ -16,7 +16,7 @@ import { emitChannelMessage, emitPermissionResponse } from "./channel.js";
 import { registerTools, type BotContext } from "./tools.js";
 import type { GroupPolicy } from "./config.js";
 import { log, debug } from "./logger.js";
-import { TYPING_INTERVAL_MS, TYPING_TIMEOUT_MS, DEFAULT_SSE_PORT, STATUS_GC_INTERVAL_MS, STATUS_AUTOCREATE_COOLDOWN_MS } from "./constants.js";
+import { TYPING_INTERVAL_MS, TYPING_TIMEOUT_MS, DEFAULT_SSE_PORT, STATUS_GC_INTERVAL_MS } from "./constants.js";
 import { StatusManager, loadTelemetryConfig, type VerbosityMode } from "./status-messages.js";
 
 interface BotRuntime {
@@ -353,30 +353,11 @@ async function startSseServer(
           text?: string;
         };
         if (statusManager && data.chatId && data.text && data.botName) {
-          let task = statusManager.findTaskByChatId(data.chatId, data.botName);
+          const task = statusManager.findTaskByChatId(data.chatId, data.botName);
           if (!task) {
-            // No active task for this (chatId, botName) — the previous task was
-            // finalized by send_telegram_message (intermediate reply) or /stop.
-            // Auto-create a new task so streaming resumes with a fresh status message.
-            // But skip auto-create if the most-recent finished task ended within
-            // STATUS_AUTOCREATE_COOLDOWN_MS — this suppresses phantom status messages
-            // caused by the TUI flushing its final frame after the agent reply. (v3.1.3)
-            const lastFinished = statusManager.findLastFinishedTaskByChatId(data.chatId, data.botName);
-            if (lastFinished && (Date.now() - lastFinished.finishedAt!) < STATUS_AUTOCREATE_COOLDOWN_MS) {
-              debug(`status auto-create suppressed: last task finished ${Date.now() - lastFinished.finishedAt!}ms ago (cooldown ${STATUS_AUTOCREATE_COOLDOWN_MS}ms)`);
-            } else {
-              const taskId = `${data.botName}:${data.chatId}:stream-${Date.now()}`;
-              await statusManager.startTask({
-                taskId,
-                botName: data.botName,
-                chatId: data.chatId,
-                sourceMessageId: 0,
-                mode: telemetryMode,
-              }).catch((err) => log(`status auto-create error: ${err}`));
-              task = statusManager.findTaskByChatId(data.chatId, data.botName);
-            }
-          }
-          if (task) {
+            // No active task — state is "replied" or idle. Skip per state machine.
+            debug(`status-feed: no active task for ${data.botName}:${data.chatId}, skipping`);
+          } else {
             statusManager.emitEvent({
               type: "thinking_updated",
               taskId: task.taskId,

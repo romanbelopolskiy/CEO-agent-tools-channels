@@ -1,6 +1,6 @@
 {
   "name": "ceo-agent-tools-channels",
-  "version": "3.1.3",
+  "version": "3.1.4",
   "description": "Multi-agent toolkit for startup founders. Manage isolated Claude Code agents through separate Telegram chats.",
   "author": "Roman Belopolskiy <r.belopolskiy@4sell.ai> (https://4sell.ai)",
   "main": "dist/index.js",

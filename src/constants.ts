@@ -8,4 +8,3 @@ export const DEFAULT_SSE_PORT = 3200;
 export const STATUS_DEBOUNCE_MS = 1_000;
 export const STATUS_GC_INTERVAL_MS = 60_000;
 export const STATUS_GC_MAX_AGE_MS = 10 * 60_000;
-export const STATUS_AUTOCREATE_COOLDOWN_MS = 10_000;

@@ -247,18 +247,6 @@ export class StatusManager {
     return best;
   }
 
-  /** Return the most-recent FINISHED task for (chatId, botName), regardless of age. */
-  findLastFinishedTaskByChatId(chatId: number, botName: string): TaskStatusState | undefined {
-    let best: TaskStatusState | undefined;
-    for (const [, s] of this.tasks) {
-      if (s.chatId !== chatId) continue;
-      if (s.botName !== botName) continue;
-      if (!s.finishedAt) continue;
-      if (!best || (s.finishedAt! > best.finishedAt!)) best = s;
-    }
-    return best;
-  }
-
   /** Clean old finished tasks (>10 min) to avoid memory leak. */
   gc(): void {
     const cutoff = Date.now() - STATUS_GC_MAX_AGE_MS;
