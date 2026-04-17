@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 
 ---
 
+## v3.1.7 — 2026-04-16
+
+Live output for /status and /compact — synthetic streaming task created on command, watcher pipes CLI output back to Telegram so you can see what's happening.
+
+### Added
+
+- **`streamOutput` flag in `CommandDef`** — `stop` gets `false`, `status` and `compact` get `true`. When `true`, a synthetic task is created before keystrokes are sent, enabling the `status-watcher.sh` → `/status-feed` pipeline to stream CLI output to Telegram.
+- **Synthetic task creation in `tryHandleCommand`** — for streaming commands, `statusManager.startTask({ taskId: "botName:chatId:cmd-<name>-<ts>", ... })` is called immediately after the old task is finalized and before tmux keystrokes are sent. This means the initial status message appears in TG before the CLI starts producing compact/status output.
+
+### Changed
+
+- `tryHandleCommand` now finalizes any existing task BEFORE sending keystrokes (was after). This gives a clean slate so the synthetic task for streaming commands is the sole active task when the watcher starts POSTing.
+- `/stop` behavior unchanged — `streamOutput: false`, no synthetic task, same reply as v3.1.6.
+
+---
+
 ## v3.1.6 — 2026-04-16
 
 ### Added

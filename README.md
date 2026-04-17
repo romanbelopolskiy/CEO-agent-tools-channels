@@ -306,8 +306,8 @@ These are human-operator commands intercepted by the MCP server before reaching 
 | Command | Trigger patterns | What happens |
 |---------|-----------------|--------------|
 | `/stop` | `stop`, `/stop`, `стоп`, `esc`, `escape` | Sends `Escape` to the CLI — cancels the current turn |
-| `/status` | `status`, `/status`, `статус` | Sends `Escape`, waits 150ms, then types `/status Enter` — prints current session status |
-| `/compact` | `compact`, `/compact`, `компакт` | Sends `Escape`, waits 150ms, then types `/compact Enter` — compacts the conversation context |
+| `/status` | `status`, `/status`, `статус` | Sends `Escape`, waits 150ms, then types `/status Enter` — prints current session status. Live output streams back to Telegram while command runs. |
+| `/compact` | `compact`, `/compact`, `компакт` | Sends `Escape`, waits 150ms, then types `/compact Enter` — compacts the conversation context. Live output streams back to Telegram while command runs. |
 
 **How it works:** for `/stop`, the server sends `tmux send-keys -t <botName> Escape`. For `/status` and `/compact`, it sends `Escape` first (to bring the CLI prompt back if mid-inference), waits 150ms, then types the command. All three finalize the active status message and stop the "typing…" indicator immediately.
 

@@ -143,6 +143,7 @@ type CommandDef = {
   triggers: string[];
   tmuxKeys: string[][];
   reply: string;
+  streamOutput: boolean;
 };
 
 const COMMANDS: CommandDef[] = [
@@ -151,18 +152,21 @@ const COMMANDS: CommandDef[] = [
     triggers: ["stop", "/stop", "стоп", "esc", "escape"],
     tmuxKeys: [["Escape"]],
     reply: "🛑 Interrupted",
+    streamOutput: false,
   },
   {
     name: "status",
     triggers: ["status", "/status", "статус"],
     tmuxKeys: [["Escape"], ["/status", "Enter"]],
     reply: "📊 Sent /status to CLI",
+    streamOutput: true,
   },
   {
     name: "compact",
     triggers: ["compact", "/compact", "компакт"],
     tmuxKeys: [["Escape"], ["/compact", "Enter"]],
     reply: "🗜 Sent /compact to CLI",
+    streamOutput: true,
   },
 ];
 
@@ -178,6 +182,28 @@ async function tryHandleCommand(botName: string, chatId: number, text: string): 
     return `❌ No tmux session '${botName}' — claude-tg not running`;
   }
 
+  // Finalize any existing active task for this (botName, chatId) pair — clean slate.
+  try {
+    const existingTask = statusManager?.findTaskByChatId(chatId, botName);
+    if (existingTask) {
+      statusManager?.finishTask(existingTask.taskId);
+      log(`[${botName}] finalized task ${existingTask.taskId} on /${cmd.name}`);
+    }
+  } catch {}
+
+  // If this command streams output, create a synthetic task so the watcher can pipe CLI output to TG.
+  if (cmd.streamOutput && statusManager && telemetryMode !== "silent") {
+    const taskId = `${botName}:${chatId}:cmd-${cmd.name}-${Date.now()}`;
+    statusManager.startTask({
+      taskId,
+      botName,
+      chatId,
+      sourceMessageId: 0,
+      mode: telemetryMode,
+    }).catch((err) => log(`[${botName}] status startTask error for /${cmd.name}: ${err}`));
+    log(`[${botName}] synthetic task ${taskId} created for /${cmd.name} streaming`);
+  }
+
   // Send keystroke batches with 150ms delay between them
   for (let i = 0; i < cmd.tmuxKeys.length; i++) {
     if (i > 0) await new Promise(r => setTimeout(r, 150));
@@ -189,15 +215,6 @@ async function tryHandleCommand(botName: string, chatId: number, text: string): 
     }
   }
   log(`[${botName}] /${cmd.name} executed via tmux send-keys`);
-
-  // Finalize the active task for this chat so the next user message gets a fresh status message
-  try {
-    const task = statusManager?.findTaskByChatId(chatId, botName);
-    if (task) {
-      statusManager?.finishTask(task.taskId);
-      log(`[${botName}] finalized task ${task.taskId} on /${cmd.name}`);
-    }
-  } catch {}
 
   // Stop the typing indicator from the interrupted turn
   stopTyping(botName, chatId);
