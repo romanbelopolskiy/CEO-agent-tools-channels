@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 
 ---
 
+## v3.1.6 — 2026-04-16
+
+### Added
+
+- **New Telegram commands: `/status` and `/compact`** — send `status`, `/status`, `статус` to forward `/status` to the CLI; send `compact`, `/compact`, `компакт` to forward `/compact`. Both work by sending `Escape` first (to bring the CLI back to the prompt if mid-inference), then typing the command with `Enter` after a 150ms delay.
+- **Generalized command registry** — refactored the old `tryHandleStop` function into `tryHandleCommand`, driven by a `COMMANDS` registry (`CommandDef[]`). Each entry declares its triggers, the sequence of `tmux send-keys` batches, and the reply string. Adding new commands requires only a new entry in the array.
+
+### Changed
+
+- `tryHandleStop` removed; all call sites now use `await tryHandleCommand(...)`.
+- `/stop` reply shortened to `🛑 Interrupted` (was `🛑 Interrupted (ESC sent to claude via tmux)`).
+
+---
+
 ## v3.1.5 — 2026-04-17
 
 ### Fixed

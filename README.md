@@ -299,22 +299,24 @@ Send a message to a Telegram chat.
 | `chat_id` | number | Chat ID (from channel event metadata) |
 | `text` | string | Message text (Markdown) |
 
-### `/stop` command (user-initiated, not a tool)
+### Interrupt commands (user-initiated, not tools)
 
-Send any of the following patterns to your bot in Telegram to interrupt the current agent turn:
+These are human-operator commands intercepted by the MCP server before reaching the agent. All three require `claude-tg` to run inside a tmux session named after the bot.
 
-```
-stop   стоп   esc   escape   /stop
-```
+| Command | Trigger patterns | What happens |
+|---------|-----------------|--------------|
+| `/stop` | `stop`, `/stop`, `стоп`, `esc`, `escape` | Sends `Escape` to the CLI — cancels the current turn |
+| `/status` | `status`, `/status`, `статус` | Sends `Escape`, waits 150ms, then types `/status Enter` — prints current session status |
+| `/compact` | `compact`, `/compact`, `компакт` | Sends `Escape`, waits 150ms, then types `/compact Enter` — compacts the conversation context |
 
-**How it works:** the server sends `tmux send-keys -t <botName> Escape`, which emulates the ESC keypress in the running claude CLI — genuinely cancelling the current turn. It also finalizes the active status message and stops the "typing…" indicator immediately.
+**How it works:** for `/stop`, the server sends `tmux send-keys -t <botName> Escape`. For `/status` and `/compact`, it sends `Escape` first (to bring the CLI prompt back if mid-inference), waits 150ms, then types the command. All three finalize the active status message and stop the "typing…" indicator immediately.
 
 **Constraints:**
 - `claude-tg` must be running inside a tmux session named after the bot (e.g. session `devops` for bot `devops`).
 - If the session doesn't exist, the bot replies: "No tmux session '<botName>' — claude-tg not running".
 - launchd plist must include `/opt/homebrew/bin` on PATH (see Setup, step 5).
 
-**For agents:** do NOT call `/stop` programmatically. This is a human interrupt — only the operator should send it from Telegram.
+**For agents:** do NOT use these programmatically. These are human interrupts — only the operator should send them from Telegram.
 
 ### `telegram_access`
 

@@ -137,35 +137,72 @@ function createMcpServer(
   return server;
 }
 
-// --- Stop command: send ESC to the claude CLI running in tmux ---
-const STOP_PATTERN = /^\s*(stop|стоп|esc|escape|\/stop)\s*$/i;
+// --- Command registry: send keys to the claude CLI running in tmux ---
+type CommandDef = {
+  name: string;
+  triggers: string[];
+  tmuxKeys: string[][];
+  reply: string;
+};
 
-function tryHandleStop(botName: string, chatId: number, text: string): string | null {
-  if (!STOP_PATTERN.test(text)) return null;
+const COMMANDS: CommandDef[] = [
+  {
+    name: "stop",
+    triggers: ["stop", "/stop", "стоп", "esc", "escape"],
+    tmuxKeys: [["Escape"]],
+    reply: "🛑 Interrupted",
+  },
+  {
+    name: "status",
+    triggers: ["status", "/status", "статус"],
+    tmuxKeys: [["Escape"], ["/status", "Enter"]],
+    reply: "📊 Sent /status to CLI",
+  },
+  {
+    name: "compact",
+    triggers: ["compact", "/compact", "компакт"],
+    tmuxKeys: [["Escape"], ["/compact", "Enter"]],
+    reply: "🗜 Sent /compact to CLI",
+  },
+];
+
+async function tryHandleCommand(botName: string, chatId: number, text: string): Promise<string | null> {
+  const trimmed = text.trim().toLowerCase();
+  const cmd = COMMANDS.find(c => c.triggers.includes(trimmed));
+  if (!cmd) return null;
+
+  // Check whether the tmux session exists (non-zero exit = no session)
   try {
-    // Check whether the tmux session exists (non-zero exit = no session)
-    try {
-      execFileSync("tmux", ["has-session", "-t", botName], { timeout: 3000 });
-    } catch {
-      return `❌ No tmux session '${botName}' — claude-tg not running`;
-    }
-    // Send Escape key to cancel the current turn
-    execFileSync("tmux", ["send-keys", "-t", botName, "Escape"], { timeout: 3000 });
-    log(`[${botName}] ESC sent via tmux send-keys`);
-    // Finalize the active task for this chat so the next user message gets a fresh status message
-    if (statusManager) {
-      const task = statusManager.findTaskByChatId(chatId, botName);
-      if (task) {
-        statusManager.finishTask(task.taskId);
-        log(`[${botName}] finalized task ${task.taskId} on stop`);
-      }
-    }
-    // Stop the typing indicator from the interrupted turn
-    stopTyping(botName, chatId);
-    return "🛑 Interrupted (ESC sent to claude via tmux)";
-  } catch (err: any) {
-    return `❌ Stop failed: ${err.message}`;
+    execFileSync("tmux", ["has-session", "-t", botName], { timeout: 3000 });
+  } catch {
+    return `❌ No tmux session '${botName}' — claude-tg not running`;
   }
+
+  // Send keystroke batches with 150ms delay between them
+  for (let i = 0; i < cmd.tmuxKeys.length; i++) {
+    if (i > 0) await new Promise(r => setTimeout(r, 150));
+    try {
+      execFileSync("tmux", ["send-keys", "-t", botName, ...cmd.tmuxKeys[i]], { timeout: 3000 });
+    } catch (err) {
+      log(`[${botName}] tmux send-keys failed for ${cmd.name}: ${err}`);
+      return `❌ tmux send-keys failed for /${cmd.name}`;
+    }
+  }
+  log(`[${botName}] /${cmd.name} executed via tmux send-keys`);
+
+  // Finalize the active task for this chat so the next user message gets a fresh status message
+  try {
+    const task = statusManager?.findTaskByChatId(chatId, botName);
+    if (task) {
+      statusManager?.finishTask(task.taskId);
+      log(`[${botName}] finalized task ${task.taskId} on /${cmd.name}`);
+    }
+  } catch {}
+
+  // Stop the typing indicator from the interrupted turn
+  stopTyping(botName, chatId);
+
+  return cmd.reply;
 }
 
 // --- Get all bot names that share a token with the given bot ---
@@ -545,7 +582,7 @@ function startPolling(
               continue;
             }
 
-            const stopReply = tryHandleStop(botName, msg.chat.id, text);
+            const stopReply = await tryHandleCommand(botName, msg.chat.id, text);
             if (stopReply) {
               await telegram.sendMessage(msg.chat.id, stopReply);
               continue;
@@ -593,7 +630,7 @@ function startPolling(
             continue;
           }
 
-          const stopReply = tryHandleStop(botName, msg.chat.id, text);
+          const stopReply = await tryHandleCommand(botName, msg.chat.id, text);
           if (stopReply) {
             await telegram.sendMessage(msg.chat.id, stopReply);
             continue;
