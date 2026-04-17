@@ -18,7 +18,7 @@ RENDER="$SCRIPT_DIR/render-tui.py"
 PREV_HASH=""
 
 while true; do
-  sleep 1
+  sleep 3
 
   [ -f "$LOGFILE" ] || continue
   [ -s "$LOGFILE" ] || continue

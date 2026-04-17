@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 ---
 
+## [3.1.8] — 2026-04-17
+
+### Changed
+
+- **Cadence 1s → 3s** — `STATUS_DEBOUNCE_MS` in `src/constants.ts` changed from `1_000` to `3_000`; `sleep 1` in `status-watcher.sh` line 21 changed to `sleep 3`. Both constants move in lockstep: the debounce controls how often the SSE server sends `editMessageText`, and the watcher sleep controls how often it POSTs a new frame. At 3s the edit rate is well below the Telegram Bot API limit of ~1 edit/sec/chat, eliminating 429 risk while keeping updates responsive.
+
+### Fixed
+
+- **Live TUI output stops updating after ~60s** — root cause: `render-tui.py` replayed the **entire** `script(1)` log file through pyte on every watcher tick. As the log grows (4+ MB after an hour of active tool calls), pyte replay time grows with it. Combined with `curl --max-time 3` in `status-watcher.sh`, POSTs started timing out once the log was large enough — the watcher fell behind indefinitely and no new frames reached Telegram. Fix: `render-tui.py` now reads only the last 256 KB of the log file (`os.path.getsize()` + `f.seek(size - TAIL_WINDOW)` + `f.read()`). This makes each tick O(1) in log size. A 256 KB window is large enough to cover many full TUI screens with scrollback; if the file is smaller, the full file is read as before.
+
+---
+
 ## v3.1.7 — 2026-04-16
 
 Live output for /status and /compact — synthetic streaming task created on command, watcher pipes CLI output back to Telegram so you can see what's happening.

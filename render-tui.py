@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Render a script(1) capture of a TTY UI to plain text via VT100 emulation."""
+import os
 import re
 import sys
 
@@ -55,8 +56,14 @@ def is_chrome(line: str) -> bool:
     return False
 
 
+TAIL_WINDOW = 256 * 1024  # 256 KB — O(1) per tick regardless of log size
+
+
 def render(path: str, max_lines: int = 25) -> str:
+    size = os.path.getsize(path)
     with open(path, "rb") as f:
+        if size > TAIL_WINDOW:
+            f.seek(size - TAIL_WINDOW)
         data = f.read()
 
     width = 200
