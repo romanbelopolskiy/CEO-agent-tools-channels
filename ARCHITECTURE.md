@@ -41,7 +41,7 @@ CEO-agent-tools-channels/
 ├── dist/                   # Compiled JS (tsc output). This is what runs.
 ├── claude-tg               # Shell launcher: picks bot, model, effort, starts Claude Code
 ├── status-watcher.sh       # Background watcher: tails script(1) log, POSTs to /status-feed
-├── render-tui.py           # Renders TTY capture to plain text (pyte), strips chrome, normalizes counters
+├── render-tui.py           # Renders TTY capture to plain text (pyte), strips chrome
 ├── package.json            # v3.1.8, deps: @modelcontextprotocol/sdk
 ├── tsconfig.json           # ES2022 + Node16 module resolution
 ├── CHANGELOG.md            # Version history
@@ -380,10 +380,6 @@ Strips decorative UI chrome. Current filter list (v3.1.5):
 
 Changed from a trailing-only `pop()` loop to a full-pass list comprehension `[l for l in lines if not is_chrome(l)]`, catching chrome lines anywhere in the buffer (v3.1.0).
 
-**Stable hash for idle-thinking:**
-
-The claude progress line contains a live timer and token counter (`(1m 19s · ↓ 2.3k tokens · thinking with max effort)`). Without normalization this changes every second, causing `status-watcher.sh` to post every tick and Telegram to show continuous edits. `COUNTER_RE = re.compile(r"\(\d+m\s*\d*s\s*·[^)]*\)")` substitutes the parenthetical with `(…)` before hashing. The hash stays stable between ticks during idle reasoning, so `/status-feed` POSTs are skipped until content actually changes.
-
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -399,7 +395,7 @@ The claude progress line contains a live timer and token counter (`(1m 19s · �
 | High memory usage | Finished tasks not GC'd | Check `gc()` is running. It auto-runs every 60s. |
 | `/stop` returns "No tmux session" | claude-tg not in a tmux session | Run `tmux ls`. Launch via `tmux new-session -s <botName> "cd ~/agents/<botName> && claude-tg"`. |
 | `/stop` ENOENT on launchd | Homebrew not on launchd PATH | Add `/opt/homebrew/bin` to `EnvironmentVariables.PATH` in the launchd plist (see Setup in README). |
-| Status flickers every second | Old render-tui.py without counter normalization | Update to v3.1.0 `render-tui.py`. |
+| Status freezes on long runs (≥1 min) | Old render-tui.py with COUNTER_RE + watcher hash dedupe | Update to v3.1.9 — COUNTER_RE and PREV_HASH dedupe removed. |
 | Status goes to old message after /stop | Old `findTaskByChatId` returning first task | Update to v3.1.0 `status-messages.ts`. |
 | Startup banner leaks into status (logo, model, tips) | Claude CLI emits `ESC[2J ESC[H` + full banner redraw mid-task (on every tool-call cycle start). pyte replays the full screen, leaving the banner as the top of the visible buffer until new content overwrites it. | Update to v3.1.5 `render-tui.py` — `is_chrome()` now filters all banner patterns. |
 
@@ -407,6 +403,7 @@ The claude progress line contains a live timer and token counter (`(1m 19s · �
 
 See `CHANGELOG.md` for full details.
 
+- **v3.1.9** (2026-04-17) — Unfreeze TUI stream on long runs: removed `COUNTER_RE` substitution from `render-tui.py` and `PREV_HASH` hash dedupe from `status-watcher.sh`. SSE-level dedupe (`lastRenderedText`) is sufficient.
 - **v3.1.8** (2026-04-17) — Cadence 1s → 3s (`STATUS_DEBOUNCE_MS` + watcher sleep); fix live output freeze after ~60s (render-tui.py now tails last 256 KB instead of full file read).
 - **v3.1.7** (2026-04-16) — `streamOutput` flag in `CommandDef`; synthetic streaming task for `/status` and `/compact`; CLI output visible in Telegram via watcher pipeline.
 - **v3.1.6** (2026-04-16) — `/status` and `/compact` commands, generalized command registry (`tryHandleCommand`), `tryHandleStop` removed.

@@ -15,8 +15,6 @@ SSE_HOST="${4:-http://127.0.0.1:3200}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RENDER="$SCRIPT_DIR/render-tui.py"
 
-PREV_HASH=""
-
 while true; do
   sleep 3
 
@@ -25,10 +23,6 @@ while true; do
 
   RAW=$(python3 "$RENDER" "$LOGFILE" 25 2>/dev/null)
   [ -z "$RAW" ] && continue
-
-  HASH=$(echo "$RAW" | md5sum 2>/dev/null | cut -d' ' -f1 || echo "$RAW" | md5 2>/dev/null)
-  [ "$HASH" = "$PREV_HASH" ] && continue
-  PREV_HASH="$HASH"
 
   JSON_TEXT=$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" <<< "$RAW")
 

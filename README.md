@@ -496,7 +496,7 @@ Set `DEBUG=0` or remove the `DEBUG` env var. Non-debug logs (`[telegram-mcp]`) a
 |---|---|
 | `/stop` returns "No tmux session" | Run `tmux ls` and verify a session named after your bot exists. If you launch via a script outside tmux, wrap it: `tmux new-session -s <botName> "cd ~/agents/<botName> && claude-tg"`. |
 | `/stop` fails with ENOENT on launchd | launchd PATH does not include Homebrew. Add `/opt/homebrew/bin` to `EnvironmentVariables` in your plist (see Setup, step 5). |
-| Status message flickers every second while agent is thinking | Upgrade to v3.1.0 — `render-tui.py` now normalizes the progress counter so the hash stays stable between ticks. |
+| Status message freezes on long subagent runs (≥1 min) | Upgrade to v3.1.9 — `COUNTER_RE` substitution and watcher hash dedupe removed; timer text now flows live. |
 | Status updates go to an old message after `/stop` and a new task | Upgrade to v3.1.0 — `StatusManager.findTaskByChatId` now returns the most-recent active task instead of the oldest. |
 | Status updates from bot A appear in bot B's chat (cross-bot leak) | Upgrade to v3.1.1 — `findTaskByChatId` now filters by `botName` in addition to `chatId`. |
 | Agent can't connect | SSE server not running. Run `curl http://127.0.0.1:3200/health`. If down, restart. |

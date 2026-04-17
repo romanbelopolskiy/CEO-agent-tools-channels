@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ---
 
+## [3.1.9] — 2026-04-17
+
+### Fixed
+
+- **TUI stream freezes on long subagent runs (≥1 min)** — `COUNTER_RE` in `render-tui.py` collapsed timer strings matching `\(\d+m\s*\d*s\s*·...\)` to the constant `(…)`, making rendered text stable once a run crossed the 1-minute mark. Combined with the `PREV_HASH` dedupe in `status-watcher.sh` (which skips POSTs when the md5 of the rendered output is unchanged), this caused the watcher to stop POSTing entirely — Telegram message stayed frozen on the last frame sent around 59s. Fix: removed both `COUNTER_RE` (and its substitution line in `render-tui.py`) and the `PREV_HASH`/`HASH` dedupe block in `status-watcher.sh`. The SSE-level dedupe in `StatusManager` (`lastRenderedText` comparison before calling `editMessageText`) is sufficient to prevent redundant Telegram API calls. (`render-tui.py`, `status-watcher.sh`)
+- **Existing sessions self-heal without tmux restart** — `render-tui.py` is re-read on every watcher tick (the watcher spawns `python3 render-tui.py` fresh each loop), so the `COUNTER_RE` removal takes effect immediately. Timer text now changes each tick for runs past 1 minute, which means the old watcher's hash also changes — dedupe no longer fires — so live updates resume in already-running sessions as soon as this release is deployed.
+
+---
+
 ## [3.1.8] — 2026-04-17
 
 ### Changed

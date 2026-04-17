@@ -9,7 +9,6 @@ import pyte
 
 HRULE_RE = re.compile(r"^─+$")
 USER_MSG_RE = re.compile(r"←\s+ceo-agent-tools-channels:")
-COUNTER_RE = re.compile(r"\(\d+m\s*\d*s\s*·[^)]*\)")
 MODEL_BANNER_RE = re.compile(r"^(Opus|Sonnet|Haiku)\s+\d+\.\d+\s+(with|·)")
 LOGO_CHARS = set("▐▛█▜▌▝▘ ")
 
@@ -82,7 +81,6 @@ def render(path: str, max_lines: int = 25) -> str:
     lines = [line.rstrip() for line in screen.display]
 
     lines = [l for l in lines if not is_chrome(l)]
-    lines = [COUNTER_RE.sub("(…)", l) for l in lines]
 
     last_msg = -1
     for i, line in enumerate(lines):
