@@ -58,7 +58,8 @@ def is_chrome(line: str) -> bool:
 TAIL_WINDOW = 256 * 1024  # 256 KB — O(1) per tick regardless of log size
 
 
-def render(path: str, max_lines: int = 25) -> str:
+def render(path: str, max_lines: int = 80) -> str:
+    max_lines = max(max_lines, 80)  # clamp so existing watchers passing 25 still get 80
     size = os.path.getsize(path)
     with open(path, "rb") as f:
         if size > TAIL_WINDOW:
@@ -74,11 +75,26 @@ def render(path: str, max_lines: int = 25) -> str:
     if longest >= 60:
         width = longest
 
-    screen = pyte.Screen(width, 100)
+    screen = pyte.HistoryScreen(width, 100, history=2000, ratio=0.5)
     stream = pyte.ByteStream(screen)
     stream.feed(data)
 
-    lines = [line.rstrip() for line in screen.display]
+    # Collect history (scrolled-off lines) + current display.
+    # HistoryScreen stores history.top as a deque; each entry is a row
+    # (dict or tuple of Char objects depending on pyte internal version).
+    history_lines = []
+    for row in screen.history.top:
+        if isinstance(row, dict):
+            line = "".join(
+                row.get(x, pyte.screens.Char(" ")).data
+                for x in range(screen.columns)
+            )
+        else:
+            line = "".join(getattr(c, "data", " ") for c in row)
+        history_lines.append(line.rstrip())
+
+    display_lines = [line.rstrip() for line in screen.display]
+    lines = history_lines + display_lines
 
     lines = [l for l in lines if not is_chrome(l)]
 
@@ -99,5 +115,5 @@ def render(path: str, max_lines: int = 25) -> str:
 
 if __name__ == "__main__":
     path = sys.argv[1]
-    n = int(sys.argv[2]) if len(sys.argv) > 2 else 25
+    n = int(sys.argv[2]) if len(sys.argv) > 2 else 80
     sys.stdout.write(render(path, n))

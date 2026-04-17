@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ---
 
+## [3.1.10] — 2026-04-17
+
+### Fixed
+
+- **Scrollback lost from live TUI stream** — `pyte.Screen` used a fixed visible buffer (100 rows); when the Claude Code CLI output exceeded 100 rows, older rows scrolled off the top and were permanently lost. Telegram received only the current visible frame, dropping all earlier Bash outputs and assistant messages from the turn. Fixed by switching to `pyte.HistoryScreen(width, 100, history=2000, ratio=0.5)`, which preserves up to 2000 scrolled-off rows. History rows (from `screen.history.top`) are prepended to the display rows before chrome-filtering and `USER_MSG_RE` slicing, so the full transcript of the current turn is included in the stream. (`render-tui.py`)
+- **max_lines 25 → 80** — default line limit raised from 25 to 80, and `render()` now clamps `max_lines = max(max_lines, 80)` so existing watcher sessions that pass `25` on the command line automatically get 80 rows without needing a tmux restart. `status-watcher.sh` updated to pass `80` explicitly for new sessions. The SSE handler's existing `slice(-3500)` cap means Telegram receives the most-recent ~40–80 lines depending on line length — strictly more than before. (`render-tui.py`, `status-watcher.sh`)
+
+---
+
 ## [3.1.9] — 2026-04-17
 
 ### Fixed

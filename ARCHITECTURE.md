@@ -42,7 +42,7 @@ CEO-agent-tools-channels/
 ├── claude-tg               # Shell launcher: picks bot, model, effort, starts Claude Code
 ├── status-watcher.sh       # Background watcher: tails script(1) log, POSTs to /status-feed
 ├── render-tui.py           # Renders TTY capture to plain text (pyte), strips chrome
-├── package.json            # v3.1.8, deps: @modelcontextprotocol/sdk
+├── package.json            # v3.1.10, deps: @modelcontextprotocol/sdk
 ├── tsconfig.json           # ES2022 + Node16 module resolution
 ├── CHANGELOG.md            # Version history
 └── ARCHITECTURE.md         # This file
@@ -360,6 +360,8 @@ This is intentional — the watcher keeps streaming as long as the CLI is produc
 
 **Tail window (v3.1.8):** Only the last 256 KB of the log file is read per tick (`TAIL_WINDOW = 256 * 1024`). This makes rendering O(1) in log size — critical because `script(1)` logs grow unboundedly during long tasks. Without this, pyte replay time grows with the log, causing `curl --max-time 3` timeouts in the watcher and freezing live output after ~60s.
 
+**HistoryScreen (v3.1.10):** Uses `pyte.HistoryScreen(width, 100, history=2000, ratio=0.5)` instead of `pyte.Screen`. `Screen` only keeps the visible 100-row buffer — rows that scroll off the top are permanently lost. `HistoryScreen` preserves up to 2000 scrolled-off rows in `screen.history.top` (a deque of `StaticDefaultDict` rows with integer→Char entries). After feeding the data, history rows are reconstructed via `row.get(x, pyte.screens.Char(" ")).data` and prepended to display lines, giving a full transcript of the current user-message turn. The `render()` function clamps `max_lines = max(max_lines, 80)` so existing watcher sessions that pass the old `25` argument automatically receive 80 rows without tmux restart.
+
 **Chrome filtering (`is_chrome`):**
 
 Strips decorative UI chrome. Current filter list (v3.1.5):
@@ -396,6 +398,7 @@ Changed from a trailing-only `pop()` loop to a full-pass list comprehension `[l 
 | `/stop` returns "No tmux session" | claude-tg not in a tmux session | Run `tmux ls`. Launch via `tmux new-session -s <botName> "cd ~/agents/<botName> && claude-tg"`. |
 | `/stop` ENOENT on launchd | Homebrew not on launchd PATH | Add `/opt/homebrew/bin` to `EnvironmentVariables.PATH` in the launchd plist (see Setup in README). |
 | Status freezes on long runs (≥1 min) | Old render-tui.py with COUNTER_RE + watcher hash dedupe | Update to v3.1.9 — COUNTER_RE and PREV_HASH dedupe removed. |
+| Only current frame visible in Telegram (earlier tool calls / assistant messages missing) | `pyte.Screen` drops rows that scroll off the top of the 100-row visible buffer | Update to v3.1.10 — `pyte.HistoryScreen(history=2000)` preserves scrolled-off rows. |
 | Status goes to old message after /stop | Old `findTaskByChatId` returning first task | Update to v3.1.0 `status-messages.ts`. |
 | Startup banner leaks into status (logo, model, tips) | Claude CLI emits `ESC[2J ESC[H` + full banner redraw mid-task (on every tool-call cycle start). pyte replays the full screen, leaving the banner as the top of the visible buffer until new content overwrites it. | Update to v3.1.5 `render-tui.py` — `is_chrome()` now filters all banner patterns. |
 
@@ -403,6 +406,7 @@ Changed from a trailing-only `pop()` loop to a full-pass list comprehension `[l 
 
 See `CHANGELOG.md` for full details.
 
+- **v3.1.10** (2026-04-17) — Preserve scrollback in live TUI stream: replaced `pyte.Screen` with `pyte.HistoryScreen(history=2000)` so scrolled-off rows are included in every Telegram update. `max_lines` default raised 25→80 with in-function clamp so existing sessions self-heal without tmux restart.
 - **v3.1.9** (2026-04-17) — Unfreeze TUI stream on long runs: removed `COUNTER_RE` substitution from `render-tui.py` and `PREV_HASH` hash dedupe from `status-watcher.sh`. SSE-level dedupe (`lastRenderedText`) is sufficient.
 - **v3.1.8** (2026-04-17) — Cadence 1s → 3s (`STATUS_DEBOUNCE_MS` + watcher sleep); fix live output freeze after ~60s (render-tui.py now tails last 256 KB instead of full file read).
 - **v3.1.7** (2026-04-16) — `streamOutput` flag in `CommandDef`; synthetic streaming task for `/status` and `/compact`; CLI output visible in Telegram via watcher pipeline.

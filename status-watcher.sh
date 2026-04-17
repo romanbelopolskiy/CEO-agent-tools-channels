@@ -1,6 +1,6 @@
 #!/bin/bash
 # Background watcher: tails a script(1) log file, renders the TUI via pyte
-# (VT100 emulator), and POSTs the last ~25 visible lines to the SSE server's
+# (VT100 emulator), and POSTs the last ~80 lines (including scrollback) to the SSE server's
 # /status-feed endpoint roughly every second. Launched by claude-tg, killed
 # on exit.
 #
@@ -21,7 +21,7 @@ while true; do
   [ -f "$LOGFILE" ] || continue
   [ -s "$LOGFILE" ] || continue
 
-  RAW=$(python3 "$RENDER" "$LOGFILE" 25 2>/dev/null)
+  RAW=$(python3 "$RENDER" "$LOGFILE" 80 2>/dev/null)
   [ -z "$RAW" ] && continue
 
   JSON_TEXT=$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" <<< "$RAW")
