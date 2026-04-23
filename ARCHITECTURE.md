@@ -171,7 +171,7 @@ cd ~/agents/fullstack
 - `startPolling(server, botsMap, runtime, ...)` — infinite loop per bot: `getUpdates()` → access check → media enrichment → `routeToSessions()` or `emitChannelMessage()`. Also intercepts messages matching any registered command trigger and calls `tryHandleCommand` before routing.
 - `routeToSessions(botsMap, botName, msg, ...)` — finds matching SSE sessions by bot name or wildcard, emits channel notification, starts typing, starts live status task.
 - `startTyping()` / `stopTyping()` — `sendChatAction("typing")` every 4s until agent replies or 2min timeout.
-- `tryHandleCommand(botName, chatId, text)` — async command dispatcher. Matches text against the `COMMANDS` registry (`stop`/`status`/`compact`). Sends the appropriate `tmux send-keys` batch(es) with a 150ms inter-batch delay, then finalizes the active task (`statusManager.finishTask`) and stops the typing indicator (`stopTyping`). Returns `null` if the message matches no command.
+- `tryHandleCommand(botName, chatId, text)` — async command dispatcher. First matches text against the `COMMANDS` registry (`stop`/`status`/`compact`). If nothing matches but the message starts with `/`, synthesizes a streaming passthrough command on the fly (v3.2.0) — any other slash-command is typed into the CLI verbatim with `Escape` → `/<name> [args]` → `Enter`. Sends the `tmux send-keys` batch(es) with a 150ms inter-batch delay, finalizes the active task (`statusManager.finishTask`) and stops the typing indicator (`stopTyping`). Returns `null` if the message is neither a registry trigger nor a valid passthrough.
 - `enrichMedia()` — downloads photos/documents to `/tmp/`, prepends metadata to message text.
 
 **Where things break:** if the SSE server process dies, ALL agents lose their channel. Check `tmux ls` and `curl :3200/health`. If polling errors accumulate, the bot may lag — check stderr / MCP_LOG_FILE.
@@ -332,10 +332,28 @@ Each entry has a `streamOutput: boolean` flag that controls whether a synthetic 
 | `status` | `status`, `/status`, `статус` | `Escape`, then (150ms delay), `/status Enter` | `true` |
 | `compact` | `compact`, `/compact`, `компакт` | `Escape`, then (150ms delay), `/compact Enter` | `true` |
 
+### Generic slash passthrough (v3.2.0)
+
+Any Telegram message that starts with `/` and doesn't match a registry trigger is treated as a **generic passthrough**: an on-the-fly `CommandDef` is synthesized with `tmuxKeys: [["Escape"], [raw, "Enter"]]` and `streamOutput: true`, then executed through the same pipeline as `/status` / `/compact`. This makes every Claude Code slash-command — built-in (`/help`, `/model`, `/clear`, `/review`…), project, personal, or plugin-scoped (`oh-my-claudecode:cancel`) — reachable from Telegram without adding registry entries.
+
+Passthrough guards in `tryHandleCommand`:
+- Caller opts-in with `{ allowPassthrough: true }` (default). The group-chat call site passes `access.isAllowed(userId, chatId)` as this flag, so un-paired group members never trigger passthrough (they can still send `/stop` / `/status` / `/compact` — those go through the static registry path).
+- Raw text must start with `/`.
+- `CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/` rejects all C0 control chars + DEL. Covers `\n`/`\r` (would `Enter` mid-command in tmux), plus `\x1b` (would escape slash-command mode into the TUI), `\t` (autocomplete), `\b` (buffer edit), and other terminal-meaningful bytes.
+- Length ≤ 500 chars (sanity cap).
+- First token after `/` must match `^[a-z0-9][a-z0-9_:-]{0,63}$` — a-z/0-9 start, then lowercase letters/digits/`_`/`-`/`:` (colon enables plugin scoping).
+- The full raw message (preserving arg case, e.g. `/model Opus`) is typed into the CLI as a **single argv element** to `tmux send-keys`. Only the command name is lowercased for registry lookup and reply rendering.
+- Reply: `` 🔀 Sent `/<name>` to CLI `` (name wrapped in backticks so legacy-Markdown parser in Telegram treats it as inline code — protects skill names with `_`). Output streams back via the existing `status-watcher.sh` → `/status-feed` pipeline.
+
+**Load-bearing tmux invariant:** the keystroke batch is `[["Escape"], [raw, "Enter"]]`. `raw` is passed as one argv element. tmux `send-keys` interprets named keys like `Enter`, `C-c`, `Escape`, `Up` specially **only when they appear as separate argv elements**. A refactor that splits `raw` on whitespace before handing it to `send-keys` would immediately turn user-chosen words into injected keystrokes. The invariant is documented inline in `src/index.ts`; keep it.
+
+**Access model:** passthrough is gated on `access.isAllowed` in group chats; private chats are already gated earlier in the polling loop. Legacy static commands (`/stop` / `/status` / `/compact`) are not gated — same as v3.1.x.
+
 ### Mechanism (`tryHandleCommand` in `src/index.ts`):
 
 1. Match trimmed, lowercased message text against all trigger arrays in `COMMANDS`.
-2. If no match → return `null` (message proceeds to normal routing).
+2. If no match **and** the raw text passes passthrough guards → synthesize a streaming `CommandDef` on the fly (v3.2.0).
+3. If still no match → return `null` (message proceeds to normal routing).
 3. `execFileSync("tmux", ["has-session", "-t", botName])` — verify the session exists.
 4. If not found → reply "No tmux session 'botName' — claude-tg not running" and return.
 5. **Finalize existing task:** `statusManager.findTaskByChatId(chatId, botName)` + `finishTask(task.taskId)` — clean slate before proceeding.
@@ -409,6 +427,7 @@ See `CHANGELOG.md` for full details.
 - **v3.1.10** (2026-04-17) — Preserve scrollback in live TUI stream: replaced `pyte.Screen` with `pyte.HistoryScreen(history=2000)` so scrolled-off rows are included in every Telegram update. `max_lines` default raised 25→80 with in-function clamp so existing sessions self-heal without tmux restart.
 - **v3.1.9** (2026-04-17) — Unfreeze TUI stream on long runs: removed `COUNTER_RE` substitution from `render-tui.py` and `PREV_HASH` hash dedupe from `status-watcher.sh`. SSE-level dedupe (`lastRenderedText`) is sufficient.
 - **v3.1.8** (2026-04-17) — Cadence 1s → 3s (`STATUS_DEBOUNCE_MS` + watcher sleep); fix live output freeze after ~60s (render-tui.py now tails last 256 KB instead of full file read).
+- **v3.2.0** (2026-04-23) — Generic slash passthrough in `tryHandleCommand`: any `/<name> [args]` message not in the registry is typed into the CLI verbatim with streaming output, enabling all Claude Code slash-commands (built-in and skills) via Telegram.
 - **v3.1.7** (2026-04-16) — `streamOutput` flag in `CommandDef`; synthetic streaming task for `/status` and `/compact`; CLI output visible in Telegram via watcher pipeline.
 - **v3.1.6** (2026-04-16) — `/status` and `/compact` commands, generalized command registry (`tryHandleCommand`), `tryHandleStop` removed.
 - **v3.1.5** (2026-04-17) — Strip Claude CLI startup banner from live status: logo, model/effort line, experimental warning, tip hints filtered by `is_chrome()`.

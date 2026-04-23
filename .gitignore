@@ -5,3 +5,4 @@ dist/
 access.json
 .env
 .DS_Store
+.omc/

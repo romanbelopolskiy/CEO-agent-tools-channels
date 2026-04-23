@@ -4,6 +4,26 @@ All notable changes to this project are documented here.
 
 ---
 
+## [3.2.0] — 2026-04-23
+
+### Added
+
+- **Generic slash passthrough in `tryHandleCommand`** — any Telegram message that starts with `/` and doesn't match a static `COMMANDS` registry trigger is now forwarded to the Claude Code CLI in tmux as-is. An on-the-fly `CommandDef` is synthesized with `tmuxKeys: [["Escape"], [raw, "Enter"]]` and `streamOutput: true`, then executed through the same pipeline as `/status` and `/compact`. This makes every Claude Code slash-command reachable from Telegram — built-in (`/help`, `/model`, `/clear`, `/review`), personal skills, project skills, plugin-scoped commands (`/oh-my-claudecode:cancel`) — without adding individual registry entries. Reply: `🔀 Sent /<name> to CLI`. CLI output streams back live via the existing `status-watcher.sh` → `/status-feed` pipeline. (`src/index.ts`)
+- **Passthrough guards** — `SAFE_CMD_NAME_RE = /^[a-z0-9][a-z0-9_:-]{0,63}$/` + `PASSTHROUGH_MAX_LEN = 500` + `CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/`. Raw text must start with `/`, contain no C0 control characters or DEL (blocks embedded `\x1b` / `\t` / `\b` etc. that could escape slash-command mode or drive ANSI parsing in the TUI), be ≤ 500 chars, and the first token after `/` must match the name regex (lowercase letters/digits/`_`/`-`/`:`, first char not a separator). The **raw** message (with original-case args) is typed into the CLI; only the command name is lowercased for matching and reply rendering. Anything failing a guard falls through to normal agent routing — ordinary text messages are unaffected.
+- **Group-chat access gate for passthrough** — `tryHandleCommand` now takes an `opts.allowPassthrough` flag. The group-chat call site passes `access.isAllowed(userId, chatId)` as the gate; the private-chat call site (already gated above) defaults to `true`. Net effect: in group chats, only paired/allowlisted users can execute the new generic passthrough, while the legacy static triggers (`/stop`, `/status`, `/compact`) keep their v3.1.x behavior and remain callable by any group member who can reach the bot. Closes the "any group member runs arbitrary Claude Code slash-command in Roman's CLI" gap that the passthrough would otherwise have introduced.
+- **Docs** — README "Interrupt commands" section renamed to "Interrupt and passthrough commands" with a new row and examples; ARCHITECTURE now documents the synthesis flow, guards, and access-model inheritance.
+
+### Security
+
+- Single-argv `tmux send-keys` invariant for the passthrough keystroke batch is now documented inline in `src/index.ts` — splitting `raw` on whitespace before handing it to `send-keys` would turn any user-chosen word (`Enter`, `C-c`, `Escape`, `Up`, …) into an injected keystroke. Load-bearing invariant; do not refactor without preserving it.
+- Passthrough reply `🔀 Sent ` + `/<name>` + ` to CLI` wraps the command name in backticks. Telegram's default `parse_mode: "Markdown"` treats backticked runs as inline code, so names containing `_` (e.g. `my_skill`) no longer risk HTTP 400 on unbalanced emphasis.
+
+### Rationale
+
+Before v3.2.0, exposing a new slash-command via Telegram required adding a hand-written entry to the `COMMANDS` array. With the Claude Code skills ecosystem (`/ship`, `/review`, `/design-review`, `/investigate`, `/autopilot`, `/oh-my-claudecode:cancel`, …) growing fast, that maintenance cost is no longer justified. The `/status` and `/compact` implementations were already the template: Escape → type → Enter → stream. v3.2.0 generalizes that template for everything.
+
+---
+
 ## [3.1.10] — 2026-04-17
 
 ### Fixed

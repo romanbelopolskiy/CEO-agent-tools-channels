@@ -299,17 +299,28 @@ Send a message to a Telegram chat.
 | `chat_id` | number | Chat ID (from channel event metadata) |
 | `text` | string | Message text (Markdown) |
 
-### Interrupt commands (user-initiated, not tools)
+### Interrupt and passthrough commands (user-initiated, not tools)
 
-These are human-operator commands intercepted by the MCP server before reaching the agent. All three require `claude-tg` to run inside a tmux session named after the bot.
+These are human-operator commands intercepted by the MCP server before reaching the agent. All require `claude-tg` to run inside a tmux session named after the bot.
 
 | Command | Trigger patterns | What happens |
 |---------|-----------------|--------------|
 | `/stop` | `stop`, `/stop`, `стоп`, `esc`, `escape` | Sends `Escape` to the CLI — cancels the current turn |
 | `/status` | `status`, `/status`, `статус` | Sends `Escape`, waits 150ms, then types `/status Enter` — prints current session status. Live output streams back to Telegram while command runs. |
 | `/compact` | `compact`, `/compact`, `компакт` | Sends `Escape`, waits 150ms, then types `/compact Enter` — compacts the conversation context. Live output streams back to Telegram while command runs. |
+| **`/<anything>`** (v3.2.0) | any message starting with `/` | Generic passthrough — typed into the CLI verbatim with `Escape` → `/<cmd> [args]` → `Enter`. Live output streams back to Telegram. Use this to trigger any built-in Claude Code slash-command (`/help`, `/model`, `/clear`, `/review`, `/ship`…) or any installed skill/plugin command from Telegram. |
 
-**How it works:** for `/stop`, the server sends `tmux send-keys -t <botName> Escape`. For `/status` and `/compact`, it sends `Escape` first (to bring the CLI prompt back if mid-inference), waits 150ms, then types the command. All three finalize the active status message and stop the "typing…" indicator immediately.
+**How it works:** for `/stop`, the server sends `tmux send-keys -t <botName> Escape`. For `/status`, `/compact`, and generic passthrough, it sends `Escape` first (to bring the CLI prompt back if mid-inference), waits 150ms, then types the command. All paths finalize the active status message and stop the "typing…" indicator immediately.
+
+**Passthrough guards:** the message must start with `/`, contain **no C0 control characters or DEL** (blocks `\n`, `\r`, `\t`, `\x1b` (ESC), `\b`, etc. — any of these could escape slash-command mode or drive ANSI parsing in the CLI TUI), be ≤ 500 chars, and the first token must match `^[a-z0-9][a-z0-9_:-]{0,63}$` (letters/digits/`_`/`-`/`:` — colon allows plugin-scoped commands like `/oh-my-claudecode:cancel`). Anything else falls through to normal agent routing.
+
+**Group-chat access:** in group chats, only paired/allowlisted users can trigger the generic passthrough. The legacy static triggers (`/stop`, `/status`, `/compact`) remain callable by any group member who can reach the bot, preserving v3.1.x behavior. In private chats, all three + passthrough are gated by the usual `access.isAllowed` check earlier in the polling loop.
+
+**Examples:**
+- `/help` → types `/help` in the CLI, streams the help pane back to Telegram.
+- `/model claude-sonnet-4-6` → switches model; arg case preserved.
+- `/oh-my-claudecode:cancel` → invokes the OMC cancel skill.
+- `/ship` → runs the ship skill end-to-end with live log streaming to Telegram.
 
 **Constraints:**
 - `claude-tg` must be running inside a tmux session named after the bot (e.g. session `devops` for bot `devops`).

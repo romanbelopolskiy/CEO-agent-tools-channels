@@ -170,10 +170,52 @@ const COMMANDS: CommandDef[] = [
   },
 ];
 
-async function tryHandleCommand(botName: string, chatId: number, text: string): Promise<string | null> {
-  const trimmed = text.trim().toLowerCase();
-  const cmd = COMMANDS.find(c => c.triggers.includes(trimmed));
-  if (!cmd) return null;
+// Validate a bare command name for the generic passthrough.
+// Allows plugin-scoped names like `oh-my-claudecode:cancel` and dashed names like `design-review`.
+const SAFE_CMD_NAME_RE = /^[a-z0-9][a-z0-9_:-]{0,63}$/;
+const PASSTHROUGH_MAX_LEN = 500;
+// Reject any C0 control character or DEL in the raw message. Without this, embedded
+// ESC / TAB / BS bytes would be typed into the Claude Code TUI, potentially escaping
+// slash-command mode, driving ANSI parsing, or triggering autocompletes.
+const CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
+
+async function tryHandleCommand(
+  botName: string,
+  chatId: number,
+  text: string,
+  opts: { allowPassthrough?: boolean } = {},
+): Promise<string | null> {
+  const { allowPassthrough = true } = opts;
+  const raw = text.trim();
+  const trimmed = raw.toLowerCase();
+  let cmd = COMMANDS.find(c => c.triggers.includes(trimmed));
+
+  // Generic slash passthrough: any `/<name> [args]` not in the registry is
+  // typed into the CLI verbatim (Escape → command → Enter), with streaming on.
+  // Mirrors the /status + /compact pattern so every Claude Code slash-command
+  // (built-in or user-defined skill) is reachable from Telegram.
+  if (!cmd) {
+    if (!allowPassthrough) return null;
+    if (!raw.startsWith("/")) return null;
+    if (CONTROL_CHAR_RE.test(raw)) return null;
+    if (raw.length > PASSTHROUGH_MAX_LEN) return null;
+    const name = raw.slice(1).split(/\s+/)[0].toLowerCase();
+    if (!SAFE_CMD_NAME_RE.test(name)) return null;
+    cmd = {
+      name,
+      triggers: [trimmed],
+      // SECURITY INVARIANT: `raw` is passed as a single argv element to tmux send-keys.
+      // tmux treats named keys (`Enter`, `C-c`, `Escape`, `Up`, …) specially ONLY when
+      // they appear as SEPARATE argv elements. Do not split `raw` on whitespace before
+      // passing to send-keys — that would convert any user-chosen word into a keystroke.
+      tmuxKeys: [["Escape"], [raw, "Enter"]],
+      // Wrap the command name in backticks so the default legacy-Markdown parse mode
+      // treats it as inline code. Protects names containing `_` (e.g. `my_skill`) from
+      // being interpreted as italic markers and rejected by Telegram with HTTP 400.
+      reply: `🔀 Sent \`/${name}\` to CLI`,
+      streamOutput: true,
+    };
+  }
 
   // Check whether the tmux session exists (non-zero exit = no session)
   try {
@@ -599,7 +641,11 @@ function startPolling(
               continue;
             }
 
-            const stopReply = await tryHandleCommand(botName, msg.chat.id, text);
+            // Passthrough (any `/<cmd>`) is only allowed to sender who is on the access list
+            // for this chat — an un-paired group member can still send the legacy static
+            // triggers (/stop, /status, /compact), preserving v3.1.x behavior.
+            const groupAllowPassthrough = access.isAllowed(userId, msg.chat.id);
+            const stopReply = await tryHandleCommand(botName, msg.chat.id, text, { allowPassthrough: groupAllowPassthrough });
             if (stopReply) {
               await telegram.sendMessage(msg.chat.id, stopReply);
               continue;
