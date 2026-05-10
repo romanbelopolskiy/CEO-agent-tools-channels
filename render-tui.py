@@ -19,6 +19,13 @@ def is_chrome(line: str) -> bool:
         return True
     if HRULE_RE.match(s):
         return True
+    # Section separator with label (────── label ──)
+    # Heuristic: ≥20 box-drawing dashes total + only short label between leading/trailing dash runs.
+    if s.count("─") >= 20:
+        # Strip leading & trailing dash + whitespace runs; what remains should be short.
+        inner = s.strip("─ ").strip()
+        if "─" not in inner and len(inner) <= 80:
+            return True
     if s.startswith("❯"):
         return True
     if "bypass permissions" in s:
@@ -64,6 +71,9 @@ def render(path: str, max_lines: int = 80) -> str:
     with open(path, "rb") as f:
         if size > TAIL_WINDOW:
             f.seek(size - TAIL_WINDOW)
+            # The seek can land mid-codepoint or mid-ANSI-CSI; advance past
+            # the next \n so we resume on a clean line boundary.
+            f.readline()
         data = f.read()
 
     width = 200

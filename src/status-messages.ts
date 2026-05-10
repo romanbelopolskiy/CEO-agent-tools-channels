@@ -146,6 +146,16 @@ export class StatusManager {
     model?: string;
     effort?: string;
   }): Promise<void> {
+    // Roman msg 2445: when a new user message arrives for the same (bot, chat),
+    // finalize any prior active task so streaming flows to the latest status
+    // message only. Old status messages stay frozen at their last rendered text.
+    const prior = this.findTaskByChatId(opts.chatId, opts.botName);
+    if (prior && !prior.finishedAt) {
+      this.cancelTimer(prior.taskId);
+      prior.finishedAt = Date.now();
+      debug(`startTask: finalized prior task ${prior.taskId} on new user message`);
+    }
+
     const state: TaskStatusState = {
       taskId: opts.taskId,
       botName: opts.botName,

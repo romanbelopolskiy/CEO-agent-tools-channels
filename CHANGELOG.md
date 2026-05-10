@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ---
 
+## v3.3.0 (2026-05-10)
+
+- **render-tui.py:** strip Claude Code section-separator lines (`────── label ──`) from live status streams. `is_chrome()` now treats any line with ≥20 box-drawing dashes and a short label between dash runs as decorative chrome (Roman msg 2445 #1).
+- **status-messages.ts:** `StatusManager.startTask` now finalizes any prior active task for the same `(botName, chatId)` before creating the new one. Fixes the bug where back-to-back user messages caused live updates to flow to an older status message instead of the latest (Roman msg 2445 #2).
+- **enforce-tg-send.sh:** bridge now always forwards the last assistant text from console, with dedupe only on exact-match against any `send_telegram_message` tool call in the same turn. New contract per Roman msg 2448: agents respond in console, bridge always delivers to Telegram. Adds a tiny `/tmp/enforce-tg-send.log` audit trail (timestamp, bot, action). Hook propagated to every `~/agents/*/.claude/hooks/enforce-tg-send.sh`.
+
+---
+
 ## [3.2.0] — 2026-04-23
 
 ### Added
