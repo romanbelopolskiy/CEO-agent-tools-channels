@@ -165,6 +165,17 @@ Replace `{botname}` with your bot name from the registry (e.g. `devops`, `smm`) 
 
 This file is read at startup. No restart needed if the agent isn't running yet — just create the file before launching.
 
+## Runtime dependencies
+
+Live Telegram status streaming requires both Node dependencies and the Python TUI renderer dependency:
+
+```bash
+npm ci --ignore-scripts
+sudo apt-get install -y python3-pyte
+```
+
+If `python3-pyte` is missing, `status-watcher.sh` cannot run `render-tui.py`, so the initial Telegram status message may appear but it will not update with the Claude session output.
+
 ## Operations: restart after code changes
 
 **TL;DR decision:** rebuilt `src/*.ts`? → bounce SSE. Edited an agent's `CLAUDE.md` / `render-tui.py` / `status-watcher.sh`? → bounce that agent's tmux. Touched the launchd plist? → `bootout` + `bootstrap` (not `kickstart`).

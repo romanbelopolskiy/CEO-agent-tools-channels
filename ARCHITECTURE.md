@@ -109,6 +109,16 @@ MCP connection config for the agent's Claude Code session.
 | `MCP_LOG_FILE` | (none) | If set, also write logs to this file |
 | `AGENT_DIR` | `process.cwd()` | Directory to read `.claude-tg.json` from |
 
+## Runtime dependencies
+
+`render-tui.py` imports `pyte` and is called by every `status-watcher.sh` process. On Ubuntu agents-central install it from apt:
+
+```bash
+sudo apt-get install -y python3-pyte
+```
+
+Missing `python3-pyte` is a live-status outage: watcher ticks fail before POSTing rendered Claude output to `/status-feed`.
+
 ## How to start / stop / restart
 
 ### Restart topology

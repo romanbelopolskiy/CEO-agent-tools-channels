@@ -14,6 +14,18 @@ SSE_HOST="${4:-http://127.0.0.1:3200}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RENDER="$SCRIPT_DIR/render-tui.py"
+WATCHER_LOG="${STATUS_WATCHER_LOG:-/tmp/status-watcher-${BOT_NAME}.log}"
+RENDER_ERROR_SENT=0
+
+post_status() {
+  local text="$1"
+  local json_text
+  json_text=$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" <<< "$text")
+  curl -sS -X POST "$SSE_HOST/status-feed" \
+    -H 'Content-Type: application/json' \
+    -d "{\"botName\":\"$BOT_NAME\",\"chatId\":$CHAT_ID,\"text\":$json_text}" \
+    -o /dev/null --max-time 3 2>/dev/null || true
+}
 
 while true; do
   sleep 3
@@ -21,13 +33,22 @@ while true; do
   [ -f "$LOGFILE" ] || continue
   [ -s "$LOGFILE" ] || continue
 
-  RAW=$(python3 "$RENDER" "$LOGFILE" 80 2>/dev/null)
+  ERRFILE=$(mktemp "/tmp/status-render-${BOT_NAME}.XXXXXX")
+  RAW=$(python3 "$RENDER" "$LOGFILE" 80 2>"$ERRFILE")
+  RC=$?
+  if [[ $RC -ne 0 ]]; then
+    ERR=$(tail -20 "$ERRFILE" | tr -d '\r')
+    printf '%s render failed rc=%s: %s\n' "$(date -Is)" "$RC" "$ERR" >> "$WATCHER_LOG"
+    if [[ "$RENDER_ERROR_SENT" -eq 0 ]]; then
+      post_status "⚠️ Live status renderer failed for $BOT_NAME. Install/check python dependency: python3-pyte.\n$ERR"
+      RENDER_ERROR_SENT=1
+    fi
+    rm -f "$ERRFILE"
+    continue
+  fi
+  rm -f "$ERRFILE"
+  RENDER_ERROR_SENT=0
   [ -z "$RAW" ] && continue
 
-  JSON_TEXT=$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" <<< "$RAW")
-
-  curl -sS -X POST "$SSE_HOST/status-feed" \
-    -H 'Content-Type: application/json' \
-    -d "{\"botName\":\"$BOT_NAME\",\"chatId\":$CHAT_ID,\"text\":$JSON_TEXT}" \
-    -o /dev/null --max-time 3 2>/dev/null || true
+  post_status "$RAW"
 done

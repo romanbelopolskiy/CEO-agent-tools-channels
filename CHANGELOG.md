@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ---
 
+## v3.3.2 (2026-05-18)
+
+- **Fix VM live-status renderer dependency:** documents `python3-pyte` as a required runtime package for `render-tui.py`; missing `pyte` caused `status-watcher.sh` to produce empty output, so Telegram status messages did not show the live Claude session output.
+- **Fail-loud watcher diagnostics:** `status-watcher.sh` now logs renderer failures to `/tmp/status-watcher-<bot>.log` and posts a one-shot diagnostic into the active status message instead of silently swallowing stderr.
+
+---
+
 ## v3.3.1 (2026-05-18)
 
 - **VM runtime patch captured in git:** adds the `auto-compact` gate that defers Telegram messages while `/compact` runs when HUD context is high, preventing user messages from being forwarded into an overfull Claude session.
