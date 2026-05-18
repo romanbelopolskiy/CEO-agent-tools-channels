@@ -111,54 +111,176 @@ MCP connection config for the agent's Claude Code session.
 
 ## How to start / stop / restart
 
-### Start the SSE server (production)
+### Restart topology
+
+Two independent layers; restart what you changed. The one Roman trips on most: **editing `src/**/*.ts` and forgetting that the SSE server caches the old `dist/` until it is restarted.**
+
+1. **SSE server (launchd job `com.ceo-agent-tools.channels-sse`)** — single process, handles TG polling for all bots, runs `tryHandleCommand` (slash-passthrough, `/stop`, `/status`, `/compact`), brokers MCP tools to all agent CLIs. Edit any `src/*.ts`, run `npm run build`, then bounce this job.
+2. **Per-agent CLI (`claude-tg` inside a tmux session named after the bot)** — one tmux per agent, each runs its own Claude Code process, its own `status-watcher.sh` child, and holds its own session state. Edit agent config (`~/agents/<bot>/CLAUDE.md`, `.mcp.json`, `.claude-tg.json`) or `render-tui.py` / `status-watcher.sh`, then bounce the agent's tmux.
+
+No launchd job wraps the agent tmux sessions — they are started by hand (`cd ~/agents/<bot> && claude-tg`). If the Mac reboots, the SSE server comes back automatically (`KeepAlive=true`) but agent sessions need to be relaunched manually.
+
+### Decision table — what changed → what to restart
+
+| I edited… | Rebuild dist? | Restart SSE? | Restart agent tmux? |
+|---|---|---|---|
+| `src/**/*.ts` in this repo | **Yes** (`npm run build`) | **Yes** | No |
+| `render-tui.py` | No | No | **Yes** (watcher is a child of `claude-tg`) |
+| `status-watcher.sh` | No | No | **Yes** |
+| `claude-tg` launcher script | No | No | **Yes** |
+| `~/agents/<bot>/CLAUDE.md` | No | No | **Yes** |
+| `~/agents/<bot>/.mcp.json` or `.claude-tg.json` | No | No | **Yes** |
+| `~/.claude/telegram-bots.json` (add/remove bot token) | No | **Yes** | New bot: launch its tmux |
+| `~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist` | No | **Yes** via `bootout` + `bootstrap` (plist changes do NOT propagate through `kickstart`) | No |
+
+### Restart the SSE server after code changes (the 99% case)
 
 ```bash
 cd ~/CEO-agent-tools-channels
-PORT=3200 TRANSPORT=sse node dist/index.js
+npm run build                                                    # src/ → dist/
+launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse
+sleep 0.5 && curl -sf http://127.0.0.1:3200/health && echo " ✅"
 ```
 
-Or via the tmux-based background pattern Roman uses:
+- `kickstart -k` terminates the running process and re-launches it under the same launchd job. `-k` is required when `KeepAlive=true` (the default here), otherwise launchd would respawn the old process before `kickstart` gets to it.
+- The TG polling loop inside SSE is the layer that evaluates `tryHandleCommand`. Until you kickstart, every `/foo` from TG runs the pre-build logic.
+- Agent tmux sessions keep their MCP connection alive — the `@modelcontextprotocol/sdk` client auto-reconnects to SSE when it returns. Normal turns resume in ~1–2s with no human action.
+
+### Restart the SSE server after plist changes
+
+When you edit `~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist` itself (new env var, changed PATH, etc.), `kickstart` is **not enough** — launchd keeps the cached plist in memory. Use bootout/bootstrap:
 
 ```bash
-tmux new-session -d -s ceo-tools \
-  "cd ~/CEO-agent-tools-channels && PORT=3200 TRANSPORT=sse node dist/index.js"
+launchctl bootout  gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
+curl -sf http://127.0.0.1:3200/health && echo " ✅"
 ```
 
-### Stop
+### Restart one agent tmux
+
+Preferred: attach, exit the CLI cleanly, relaunch. Keeps the tmux session for history.
 
 ```bash
-tmux kill-session -t ceo-tools
-# or: kill $(lsof -ti:3200)
+tmux attach -t devops
+# inside: press Ctrl-C if a turn is running, then type /exit (or Ctrl-D)
+# then: claude-tg --effort max
+# detach: Ctrl-B d
 ```
 
-### Restart after code changes
+Cold restart (nukes the tmux too):
 
 ```bash
+tmux kill-session -t devops 2>/dev/null
+( cd ~/agents/devops && tmux new-session -d -s devops 'claude-tg --effort max' )
+```
+
+### Restart all agent tmux sessions at once
+
+No built-in launcher yet; this is the usual loop. Skip any tmux sessions that aren't agent CLIs (e.g. `ceo-tools` if you happen to run one manually).
+
+```bash
+for s in $(tmux ls -F '#S' 2>/dev/null); do
+  case "$s" in
+    ceo-tools|qa-*) continue;;  # skip non-agent sessions
+  esac
+  tmux kill-session -t "$s"
+done
+for bot in devops fullstack frontend changelog smm trends network \
+           company-pulse meet finance jira-admin erp-admin engage; do
+  [[ -d ~/agents/$bot ]] && \
+    ( cd ~/agents/$bot && tmux new-session -d -s "$bot" 'claude-tg --effort max' )
+done
+```
+
+### Full reload (SSE + every agent) — the nuclear option
+
+Do this when you're not sure what's stale, or after a `git pull` that touched both `src/` and `~/agents/<name>/CLAUDE.md`.
+
+```bash
+cd ~/CEO-agent-tools-channels && npm run build && \
+  launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse && \
+  sleep 0.5 && curl -sf http://127.0.0.1:3200/health && echo " SSE ✅"
+
+for s in $(tmux ls -F '#S' 2>/dev/null); do
+  case "$s" in ceo-tools|qa-*) continue;; esac
+  tmux kill-session -t "$s"
+done
+for bot in devops fullstack frontend changelog smm trends network \
+           company-pulse meet finance jira-admin erp-admin engage; do
+  [[ -d ~/agents/$bot ]] && \
+    ( cd ~/agents/$bot && tmux new-session -d -s "$bot" 'claude-tg --effort max' )
+done
+```
+
+### Stop everything (downtime)
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
+for s in $(tmux ls -F '#S' 2>/dev/null); do tmux kill-session -t "$s"; done
+```
+
+### Start again
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
+curl -sf http://127.0.0.1:3200/health && echo " SSE ✅"
+# then relaunch each agent tmux (see loop above)
+```
+
+### Bare-metal dev run (no launchd)
+
+Useful when debugging SSE itself — you want logs on stdout and to control Ctrl-C.
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
 cd ~/CEO-agent-tools-channels
-npm run build                          # compile TypeScript → dist/
-tmux kill-session -t ceo-tools         # stop old
-tmux new-session -d -s ceo-tools \     # start new
-  "cd ~/CEO-agent-tools-channels && PORT=3200 TRANSPORT=sse node dist/index.js"
+PORT=3200 TRANSPORT=sse DEBUG=true node dist/index.js
+# Ctrl-C to stop. Don't forget to re-bootstrap the launchd job when done.
 ```
 
-**Critical:** always run `npm run build` before restarting. The process runs from `dist/`, not `src/`. If you edit `.ts` files without building, the server uses stale compiled JS.
-
-### Health check
+### Health checks
 
 ```bash
-curl http://127.0.0.1:3200/health
+# Is the launchd job running?
+launchctl list | grep com.ceo-agent-tools
+# → "9877  0  com.ceo-agent-tools.channels-sse"   (PID  exit-status  label)
+
+# Does SSE respond?
+curl -sf http://127.0.0.1:3200/health
 # → {"status":"ok","sessions":2,"bots":["fullstack","devops"],"typing":0}
+
+# Is dist newer than src? (if not, you forgot `npm run build`)
+ls -lct dist/index.js src/index.ts | head -2
+
+# What version is the running SSE? (match against package.json)
+node -p 'require("./package.json").version'
+# Compare to the timestamp in /tmp/ceo-agent-tools-channels.log at last start.
+
+# Tail server logs
+tail -f /tmp/ceo-agent-tools-channels.log
+
+# List active agent tmux sessions
+tmux ls
 ```
 
-### Launch an agent session
+### Triage: "I edited code, rebuilt, sent a command in TG — nothing changed"
+
+Run each check until one fails:
+
+1. `ls -lct dist/index.js src/index.ts | head -2` — is `dist/` newer than `src/`? If not: `npm run build`.
+2. `launchctl list | grep com.ceo-agent-tools` — running? If PID is `-`: `launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse`.
+3. `tail -20 /tmp/ceo-agent-tools-channels.log` — startup errors? Missing env var? Port conflict?
+4. Compare the process start time to your build time: `ps -o lstart -p $(launchctl list | awk '/com.ceo-agent-tools/ {print $1}')` vs `stat -f '%Sm' dist/index.js`. If process is older than dist, **you forgot to kickstart**.
+5. Only if none of the above: the feature genuinely isn't in the source. Run `grep -n <symbol> dist/index.js` to confirm it shipped into the compiled bundle.
+
+### Launch a new agent session from scratch
 
 ```bash
 cd ~/agents/fullstack
 ~/CEO-agent-tools-channels/claude-tg --effort max
 ```
 
-`claude-tg` auto-detects the bot from the directory name, reads `.claude-tg.json` for defaults, checks SSE server health, writes `.mcp.json` if missing, then spawns Claude Code.
+`claude-tg` auto-detects the bot from the directory name, reads `.claude-tg.json` for defaults, checks SSE server health, writes `.mcp.json` if missing, then spawns Claude Code under `script(1)` so `status-watcher.sh` can tail the TTY capture. The launcher runs `pkill -f "status-watcher\.sh.*<botName>"` on startup to kill any orphaned watcher from a crashed previous session.
 
 ## Module-by-module guide
 

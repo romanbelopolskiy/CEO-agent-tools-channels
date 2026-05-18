@@ -15,9 +15,10 @@ import { PermissionManager } from "./permissions.js";
 import { emitChannelMessage, emitPermissionResponse } from "./channel.js";
 import { registerTools, type BotContext } from "./tools.js";
 import type { GroupPolicy } from "./config.js";
-import { log, debug } from "./logger.js";
+import { log, debug, logConversation } from "./logger.js";
 import { TYPING_INTERVAL_MS, TYPING_TIMEOUT_MS, DEFAULT_SSE_PORT, STATUS_GC_INTERVAL_MS } from "./constants.js";
 import { StatusManager, loadTelemetryConfig, type VerbosityMode } from "./status-messages.js";
+import { maybeGate } from "./auto-compact.js";
 
 interface BotRuntime {
   ctx: BotContext;
@@ -81,7 +82,8 @@ function stopTyping(botName: string, chatId: number) {
 // --- Build MCP Server instance ---
 function createMcpServer(
   runtimes: BotRuntime[],
-  botsMap: Map<string, BotContext>
+  botsMap: Map<string, BotContext>,
+  sessionBotName: string | null = null
 ): Server {
   const botList = runtimes.map((r) => `"${r.ctx.name}" (@${r.me.username})`).join(", ");
 
@@ -108,7 +110,9 @@ function createMcpServer(
     }
   );
 
-  registerTools(server, botsMap, stopTyping, statusManager);
+  registerTools(server, botsMap, (botName, chatId) => {
+    stopTyping(botName, chatId);
+  }, statusManager);
 
   server.fallbackNotificationHandler = async (notification) => {
     if (notification.method !== "notifications/claude/channel/permission_request") {
@@ -122,7 +126,10 @@ function createMcpServer(
     const toolName = params.toolName as string;
     const description = params.description as string;
 
-    for (const runtime of runtimes) {
+    const targetRuntimes = sessionBotName
+      ? runtimes.filter((r) => r.ctx.name === sessionBotName)
+      : runtimes;
+    for (const runtime of targetRuntimes) {
       const users = runtime.ctx.access.listUsers();
       for (const userId of users) {
         try {
@@ -404,7 +411,7 @@ async function startSseServer(
       const botName = url.searchParams.get("bot") || null;
       const transport = new SSEServerTransport("/messages", res);
       const sessionId = transport.sessionId;
-      const server = createMcpServer(runtimes, botsMap);
+      const server = createMcpServer(runtimes, botsMap, botName);
 
       sseSessions.set(sessionId, { id: sessionId, server, transport, botName });
       log(`SSE session ${sessionId} connected (bot: ${botName || "all"})`);
@@ -472,7 +479,9 @@ async function startSseServer(
                   );
                   task.lastRenderedText = trimmed;
                   task.lastRenderAt = Date.now();
-                } catch {}
+                } catch (err) {
+                  debug(`status-feed editMessageText failed for ${task.botName}:${task.chatId}: ${(err as Error).message}`);
+                }
               }
             }
           }
@@ -651,12 +660,39 @@ function startPolling(
               continue;
             }
 
+            logConversation({
+              botName,
+              direction: "inbound",
+              chatId: msg.chat.id,
+              userId,
+              username: msg.from!.username || msg.from!.first_name,
+              messageId: msg.message_id,
+              chatType,
+              text,
+              meta: {
+                isGroup: true,
+                chatTitle: msg.chat.title || msg.chat.username || "",
+                botMentioned,
+                isReplyToBot,
+              },
+            });
             log(`[${botName}] Group msg from @${msg.from!.username || msg.from!.first_name} in "${msg.chat.title || msg.chat.id}"`);
 
-            if (mode === "stdio" && stdioServer) {
-              emitChannelMessage(stdioServer, botName, msg, botMentioned, isReplyToBot);
-            } else {
-              routeToSessions(botsMap, botName, msg, botMentioned, isReplyToBot);
+            {
+              const deliver = () => {
+                if (mode === "stdio" && stdioServer) {
+                  emitChannelMessage(stdioServer, botName, msg, botMentioned, isReplyToBot);
+                } else {
+                  routeToSessions(botsMap, botName, msg, botMentioned, isReplyToBot);
+                }
+              };
+              const triggerCompact = () => {
+                tryHandleCommand(botName, msg.chat.id, "compact").catch((err) =>
+                  log(`[${botName}] auto-compact trigger error: ${err}`)
+                );
+              };
+              const gated = await maybeGate(botName, msg.chat.id, triggerCompact, deliver);
+              if (!gated) deliver();
             }
             continue;
           }
@@ -700,12 +736,34 @@ function startPolling(
           }
 
           pairingNotified.delete(userId);
+          logConversation({
+            botName,
+            direction: "inbound",
+            chatId: msg.chat.id,
+            userId,
+            username: msg.from!.username || msg.from!.first_name,
+            messageId: msg.message_id,
+            chatType,
+            text,
+            meta: { isGroup: false },
+          });
           log(`[${botName}] DM from @${msg.from!.username || msg.from!.first_name}: ${text.substring(0, 50)}...`);
 
-          if (mode === "stdio" && stdioServer) {
-            emitChannelMessage(stdioServer, botName, msg, false, false);
-          } else {
-            routeToSessions(botsMap, botName, msg, false, false);
+          {
+            const deliver = () => {
+              if (mode === "stdio" && stdioServer) {
+                emitChannelMessage(stdioServer, botName, msg, false, false);
+              } else {
+                routeToSessions(botsMap, botName, msg, false, false);
+              }
+            };
+            const triggerCompact = () => {
+              tryHandleCommand(botName, msg.chat.id, "compact").catch((err) =>
+                log(`[${botName}] auto-compact trigger error: ${err}`)
+              );
+            };
+            const gated = await maybeGate(botName, msg.chat.id, triggerCompact, deliver);
+            if (!gated) deliver();
           }
         }
       } catch (err) {

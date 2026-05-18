@@ -202,9 +202,20 @@ EOF
 ### Шаг 7 — Перезапустить SSE сервер (чтобы подхватить нового бота)
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
-launchctl load ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
+launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse
+sleep 0.5 && curl -sf http://127.0.0.1:3200/health && echo " ✅"
 ```
+
+`kickstart -k` терминирует текущий процесс и даёт launchd его респавнить (работает с `KeepAlive=true`). Это канонический способ рестарта после правок `src/*.ts` или изменений в `~/.claude/telegram-bots.json`. Устаревшие `unload/load` работают, но проходят только после правки самого plist-файла; для изменений в коде используй `kickstart`.
+
+Если менял сам **plist** (`~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist`) — `kickstart` его НЕ перечитает. Тогда:
+
+```bash
+launchctl bootout  gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
+```
+
+Полный сценарий рестартов и дерево решений — см. `~/CEO-agent-tools-channels/ARCHITECTURE.md` § "How to start / stop / restart".
 
 ### Шаг 8 — Запустить в tmux
 

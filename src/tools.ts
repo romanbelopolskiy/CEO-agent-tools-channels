@@ -7,7 +7,7 @@ import type { TelegramClient } from "./telegram.js";
 import type { AccessControl } from "./access.js";
 import type { StatusManager } from "./status-messages.js";
 
-import { debug, log } from "./logger.js";
+import { debug, log, logConversation } from "./logger.js";
 
 export interface BotContext {
   name: string;
@@ -174,7 +174,16 @@ export function registerTools(
 
         try {
           onMessageSent?.(botName, chatId);
-          await bot.telegram.sendMessage(chatId, text);
+          const sent = await bot.telegram.sendMessage(chatId, text);
+          logConversation({
+            botName,
+            direction: "outbound",
+            chatId,
+            messageId: typeof sent === "object" ? sent.message_id : undefined,
+            chatType: typeof sent === "object" ? sent.chat?.type : undefined,
+            text,
+            meta: { via: "send_telegram_message" },
+          });
 
           // Finalize live status — agent has replied.
           if (statusManager) {

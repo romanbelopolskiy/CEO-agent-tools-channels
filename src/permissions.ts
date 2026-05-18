@@ -52,7 +52,7 @@ export class PermissionManager {
     const msg = [
       `🔒 *Permission request*`,
       ``,
-      `Tool: \`${toolName}\``,
+      `Tool: \`${toolName || "(не указан)"}\``,
       `Action: ${description}`,
       ``,
       `Reply \`yes ${shortId}\` or \`no ${shortId}\``,

@@ -165,6 +165,96 @@ Replace `{botname}` with your bot name from the registry (e.g. `devops`, `smm`) 
 
 This file is read at startup. No restart needed if the agent isn't running yet — just create the file before launching.
 
+## Operations: restart after code changes
+
+**TL;DR decision:** rebuilt `src/*.ts`? → bounce SSE. Edited an agent's `CLAUDE.md` / `render-tui.py` / `status-watcher.sh`? → bounce that agent's tmux. Touched the launchd plist? → `bootout` + `bootstrap` (not `kickstart`).
+
+The SSE server is one launchd-managed Node process (`com.ceo-agent-tools.channels-sse`) that brokers all Telegram traffic, evaluates `tryHandleCommand` (slash-passthrough, `/stop`, `/status`, `/compact`), and serves MCP tools to every agent CLI. Per-agent Claude Code CLIs run in their own tmux sessions (`tmux new-session -s <botName> 'claude-tg'`), each with a `status-watcher.sh` child for the live TG status stream.
+
+### After editing `src/*.ts` (99% of changes)
+
+```bash
+cd ~/CEO-agent-tools-channels
+npm run build
+launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse
+sleep 0.5 && curl -sf http://127.0.0.1:3200/health && echo " ✅"
+```
+
+`kickstart -k` terminates the current Node process and lets launchd respawn it (required because `KeepAlive=true`). Agent tmux sessions **keep running** — the MCP SDK reconnects to SSE automatically in ~1–2s.
+
+### After editing the launchd plist
+
+`kickstart` does NOT reload a changed plist. Do:
+
+```bash
+launchctl bootout  gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
+curl -sf http://127.0.0.1:3200/health && echo " ✅"
+```
+
+### After editing an agent's config (`CLAUDE.md`, `.mcp.json`, `.claude-tg.json`, `render-tui.py`, `status-watcher.sh`)
+
+Only the agent's tmux session needs to bounce. SSE stays up.
+
+```bash
+# preferred: attach, exit the CLI, relaunch (keeps tmux scrollback)
+tmux attach -t devops
+#   in the pane: Ctrl-C if a turn is running, then /exit (or Ctrl-D)
+#   claude-tg --effort max
+# detach: Ctrl-B d
+
+# cold restart (nukes tmux):
+tmux kill-session -t devops 2>/dev/null
+( cd ~/agents/devops && tmux new-session -d -s devops 'claude-tg --effort max' )
+```
+
+### Restart every agent tmux at once
+
+```bash
+for s in $(tmux ls -F '#S' 2>/dev/null); do
+  case "$s" in ceo-tools|qa-*) continue;; esac
+  tmux kill-session -t "$s"
+done
+for bot in devops fullstack frontend changelog smm trends network \
+           company-pulse meet finance jira-admin erp-admin engage; do
+  [[ -d ~/agents/$bot ]] && \
+    ( cd ~/agents/$bot && tmux new-session -d -s "$bot" 'claude-tg --effort max' )
+done
+```
+
+### Full reload (after a `git pull` that touched both layers)
+
+```bash
+cd ~/CEO-agent-tools-channels && npm run build && \
+  launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse && \
+  sleep 0.5 && curl -sf http://127.0.0.1:3200/health && echo " SSE ✅"
+
+for s in $(tmux ls -F '#S' 2>/dev/null); do
+  case "$s" in ceo-tools|qa-*) continue;; esac
+  tmux kill-session -t "$s"
+done
+for bot in devops fullstack frontend changelog smm trends network \
+           company-pulse meet finance jira-admin erp-admin engage; do
+  [[ -d ~/agents/$bot ]] && \
+    ( cd ~/agents/$bot && tmux new-session -d -s "$bot" 'claude-tg --effort max' )
+done
+```
+
+### "I edited code, rebuilt, sent a command in TG — nothing changed"
+
+Run these checks in order:
+
+```bash
+ls -lct dist/index.js src/index.ts | head -2       # dist newer than src? if not: npm run build
+launchctl list | grep com.ceo-agent-tools          # running? PID in first column
+tail -20 /tmp/ceo-agent-tools-channels.log         # startup errors?
+# process start time vs dist mtime — if process is older, you forgot to kickstart:
+ps -o lstart -p $(launchctl list | awk '/com.ceo-agent-tools/ {print $1}')
+stat -f '%Sm' dist/index.js
+```
+
+The full restart decision table and bare-metal dev-run instructions live in [`ARCHITECTURE.md`](ARCHITECTURE.md#how-to-start--stop--restart).
+
 ## Bot registry
 
 Bots are stored in `~/.claude/telegram-bots.json`:
@@ -510,9 +600,12 @@ Set `DEBUG=0` or remove the `DEBUG` env var. Non-debug logs (`[telegram-mcp]`) a
 | Status message freezes on long subagent runs (≥1 min) | Upgrade to v3.1.9 — `COUNTER_RE` substitution and watcher hash dedupe removed; timer text now flows live. |
 | Status updates go to an old message after `/stop` and a new task | Upgrade to v3.1.0 — `StatusManager.findTaskByChatId` now returns the most-recent active task instead of the oldest. |
 | Status updates from bot A appear in bot B's chat (cross-bot leak) | Upgrade to v3.1.1 — `findTaskByChatId` now filters by `botName` in addition to `chatId`. |
-| Agent can't connect | SSE server not running. Run `curl http://127.0.0.1:3200/health`. If down, restart. |
+| Agent can't connect | SSE server not running. Run `curl http://127.0.0.1:3200/health`. If down, `launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse`. |
 | Messages not arriving | Wrong bot name in `.mcp.json` or polling error. Check stderr logs for `[botname] Polling error`. |
-| "typing..." indicator stuck | Will auto-stop after 2 min. Or restart server. With v3.1.0, `/stop` also calls `stopTyping` immediately. |
+| "typing..." indicator stuck | Will auto-stop after 2 min. Or restart SSE server. With v3.1.0, `/stop` also calls `stopTyping` immediately. |
+| I edited `src/*.ts` and rebuilt, but TG commands still run old code | **You forgot to restart the SSE server.** Run `launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse`. See ARCHITECTURE.md § "How to start / stop / restart" for the full restart topology. |
+| Plist change (new env var, PATH fix) didn't take effect | `kickstart` keeps the cached plist. Use `launchctl bootout … && launchctl bootstrap …` instead (see ARCHITECTURE.md). |
+| Changed `~/agents/<bot>/CLAUDE.md` but agent still uses old role | Agent CLI caches the config at launch. Attach to the tmux (`tmux attach -t <bot>`), `/exit` the CLI, relaunch `claude-tg`. |
 
 ## Skills
 

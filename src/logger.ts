@@ -20,3 +20,34 @@ export function log(message: string): void {
 export function debug(message: string): void {
   if (DEBUG) process.stderr.write(`[telegram-mcp:debug] ${message}\n`);
 }
+
+export type ConversationDirection = "inbound" | "outbound" | "system";
+
+export interface ConversationLogEvent {
+  botName: string;
+  direction: ConversationDirection;
+  chatId?: number;
+  userId?: number;
+  username?: string;
+  messageId?: number;
+  chatType?: string;
+  text?: string;
+  meta?: Record<string, unknown>;
+}
+
+const CONVERSATION_LOG_DIR = process.env.CONVERSATION_LOG_DIR || "/srv/agents/logs/telegram-conversations";
+
+export function logConversation(event: ConversationLogEvent): void {
+  try {
+    fs.mkdirSync(CONVERSATION_LOG_DIR, { recursive: true, mode: 0o700 });
+    const day = new Date().toISOString().slice(0, 10);
+    const file = `${CONVERSATION_LOG_DIR}/${day}.jsonl`;
+    const record = {
+      ts: new Date().toISOString(),
+      ...event,
+    };
+    fs.appendFileSync(file, JSON.stringify(record, null, 0) + "\n", { mode: 0o600 });
+  } catch (err) {
+    debug(`conversation log failed: ${err}`);
+  }
+}

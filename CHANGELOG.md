@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 
 ---
 
+## v3.3.1 (2026-05-18)
+
+- **VM runtime patch captured in git:** adds the `auto-compact` gate that defers Telegram messages while `/compact` runs when HUD context is high, preventing user messages from being forwarded into an overfull Claude session.
+- **Conversation audit logging:** records inbound/outbound Telegram conversation events as JSONL under `/srv/agents/logs/telegram-conversations` for operational review.
+- **Scoped permission forwarding hardening:** SSE sessions created with `?bot=<name>` now forward permission requests only to that bot's paired users.
+- **Linux launcher compatibility:** `claude-tg` now resolves symlinks, supports util-linux `script -c`, and launches Claude with `--permission-mode bypassPermissions` for the VM runtime.
+- **Operations docs:** documents the VM/SSE restart topology and the difference between SSE restarts, agent tmux restarts, and plist reloads.
+
+---
+
 ## v3.3.0 (2026-05-10)
 
 - **render-tui.py:** strip Claude Code section-separator lines (`────── label ──`) from live status streams. `is_chrome()` now treats any line with ≥20 box-drawing dashes and a short label between dash runs as decorative chrome (Roman msg 2445 #1).
