@@ -41,6 +41,33 @@ const sseSessions = new Map<string, SseSession>();
 let statusManager: StatusManager | null = null;
 let telemetryMode: VerbosityMode = "status";
 
+const STATUS_CODE_WRAPPER_OVERHEAD = "<pre><code></code></pre>".length;
+const STATUS_CODE_MAX_LENGTH = 4000;
+
+function escapeTelegramHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function formatStatusAsCodeBlock(text: string): string {
+  let raw = text || "\u200b";
+  let escaped = escapeTelegramHtml(raw);
+  const maxEscapedLength = STATUS_CODE_MAX_LENGTH - STATUS_CODE_WRAPPER_OVERHEAD;
+
+  while (escaped.length > maxEscapedLength && raw.length > 1) {
+    raw = raw.slice(Math.max(0, raw.length - Math.ceil(raw.length * 0.9)));
+    escaped = escapeTelegramHtml(raw);
+  }
+
+  if (escaped.length > maxEscapedLength) {
+    escaped = escaped.slice(-maxEscapedLength);
+  }
+
+  return `<pre><code>${escaped}</code></pre>`;
+}
+
 // Load per-agent config if we're inside an agent dir.
 try {
   const agentDir = process.env.AGENT_DIR || process.cwd();
@@ -469,16 +496,16 @@ async function startSseServer(
             // Override rendered text with raw CLI output
             const client = botsMap.get(task.botName)?.telegram;
             if (client && task.statusMessageId) {
-              const trimmed = data.text.slice(-3500); // Telegram limit ~4096
-              if (trimmed !== task.lastRenderedText) {
+              const renderedCode = formatStatusAsCodeBlock(data.text);
+              if (renderedCode !== task.lastRenderedText) {
                 try {
                   await client.editMessageText(
                     task.chatId,
                     task.statusMessageId,
-                    trimmed,
-                    "",
+                    renderedCode,
+                    "HTML",
                   );
-                  task.lastRenderedText = trimmed;
+                  task.lastRenderedText = renderedCode;
                   task.lastRenderAt = Date.now();
                 } catch (err) {
                   debug(`status-feed editMessageText failed for ${task.botName}:${task.chatId}: ${(err as Error).message}`);

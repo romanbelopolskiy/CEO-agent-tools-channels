@@ -232,15 +232,15 @@ if [[ "$TELEMETRY_MODE" != "silent" && -n "$WATCHER_CHAT_ID" ]]; then
   "$SCRIPT_DIR/status-watcher.sh" "$CLI_LOG" "$CLI_BOT" "$WATCHER_CHAT_ID" "$SSE_HOST" &
   WATCHER_PID=$!
   echo "Live status watcher started (PID $WATCHER_PID, chat $WATCHER_CHAT_ID)"
-  CMD=(claude --dangerously-load-development-channels server:ceo-agent-tools-channels --permission-mode bypassPermissions --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}")
+  CMD=(claude --dangerously-load-development-channels server:ceo-agent-tools-channels --dangerously-skip-permissions --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}")
   if script --help 2>&1 | grep -q -- ' -c,'; then
     # Linux util-linux: script [options] [file], command must be passed via -c.
     EXTRA_ARGS="${(j: :)${(q)CLAUDE_ARGS}}"
-    script -q -c "claude --dangerously-load-development-channels server:ceo-agent-tools-channels --permission-mode bypassPermissions --model ${(q)CLI_MODEL} --effort ${(q)CLI_EFFORT} $EXTRA_ARGS" "$CLI_LOG"
+    script -q -c "claude --dangerously-load-development-channels server:ceo-agent-tools-channels --dangerously-skip-permissions --model ${(q)CLI_MODEL} --effort ${(q)CLI_EFFORT} $EXTRA_ARGS" "$CLI_LOG"
   else
     # BSD/macOS script accepts: script -q logfile command args...
     script -q "$CLI_LOG" "${CMD[@]}"
   fi
 else
-  claude --dangerously-load-development-channels server:ceo-agent-tools-channels --permission-mode bypassPermissions --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}"
+  claude --dangerously-load-development-channels server:ceo-agent-tools-channels --dangerously-skip-permissions --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}"
 fi
