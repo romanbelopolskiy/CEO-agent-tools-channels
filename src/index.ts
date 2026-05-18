@@ -475,7 +475,8 @@ async function startSseServer(
                   await client.editMessageText(
                     task.chatId,
                     task.statusMessageId,
-                    `\`\`\`\n${trimmed}\n\`\`\``,
+                    trimmed,
+                    "",
                   );
                   task.lastRenderedText = trimmed;
                   task.lastRenderAt = Date.now();

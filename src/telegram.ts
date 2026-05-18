@@ -1,4 +1,6 @@
 import { debug } from "./logger.js";
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
 
 const BASE_URL = "https://api.telegram.org";
 
@@ -130,11 +132,44 @@ export class TelegramClient {
     text: string,
     parseMode: string = "Markdown"
   ): Promise<TelegramMessage> {
-    return this.request<TelegramMessage>("sendMessage", {
-      chat_id: chatId,
-      text,
-      parse_mode: parseMode,
-    });
+    const params: Record<string, unknown> = { chat_id: chatId, text };
+    if (parseMode) params.parse_mode = parseMode;
+    return this.request<TelegramMessage>("sendMessage", params);
+  }
+
+  async sendDocument(
+    chatId: number,
+    filePath: string,
+    caption?: string,
+    parseMode: string = "Markdown"
+  ): Promise<TelegramMessage> {
+    const url = `${this.baseUrl}/sendDocument`;
+    debug(`API call: sendDocument(${JSON.stringify({ chatId, filePath, caption: caption ? "<caption>" : undefined })})`);
+
+    const data = await readFile(filePath);
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("document", new Blob([data]), basename(filePath));
+    if (caption) {
+      form.append("caption", caption);
+      form.append("parse_mode", parseMode);
+    }
+
+    const res = await fetch(url, { method: "POST", body: form });
+    if (!res.ok) {
+      const errMsg = `Telegram API error: ${res.status} ${res.statusText}`;
+      debug(`API error: sendDocument -> ${errMsg}`);
+      throw new Error(errMsg);
+    }
+
+    const body = (await res.json()) as TelegramResponse<TelegramMessage>;
+    if (!body.ok) {
+      const errMsg = `Telegram API error: ${body.description || "unknown"}`;
+      debug(`API error: sendDocument -> ${errMsg}`);
+      throw new Error(errMsg);
+    }
+    debug("API ok: sendDocument");
+    return body.result;
   }
 
   async getFile(fileId: string): Promise<{ file_path: string }> {
@@ -147,12 +182,13 @@ export class TelegramClient {
     text: string,
     parseMode: string = "Markdown"
   ): Promise<TelegramMessage | boolean> {
-    return this.request<TelegramMessage | boolean>("editMessageText", {
+    const params: Record<string, unknown> = {
       chat_id: chatId,
       message_id: messageId,
       text,
-      parse_mode: parseMode,
-    });
+    };
+    if (parseMode) params.parse_mode = parseMode;
+    return this.request<TelegramMessage | boolean>("editMessageText", params);
   }
 
   async sendChatAction(chatId: number, action: string = "typing"): Promise<boolean> {

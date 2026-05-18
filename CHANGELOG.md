@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ---
 
+## v3.3.3 (2026-05-18)
+
+- **Telegram document attachments:** `send_telegram_message` now accepts optional `file_path` and sends it via `sendDocument`, with `text` used as the caption. This fixes the false limitation that agents could only paste `.md` content as text.
+- **Safer live-status edits:** `/status-feed` edits now send raw rendered CLI text without Markdown parse mode, avoiding Telegram formatting errors from arbitrary Claude/TUI output.
+
+---
+
 ## v3.3.2 (2026-05-18)
 
 - **Fix VM live-status renderer dependency:** documents `python3-pyte` as a required runtime package for `render-tui.py`; missing `pyte` caused `status-watcher.sh` to produce empty output, so Telegram status messages did not show the live Claude session output.

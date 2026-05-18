@@ -33,10 +33,14 @@ const TOOLS = [
         },
         text: {
           type: "string",
-          description: "Message text (Markdown supported)",
+          description: "Message text or document caption (Markdown supported)",
+        },
+        file_path: {
+          type: "string",
+          description: "Optional absolute local file path to send as a Telegram document attachment",
         },
       },
-      required: ["bot_name", "chat_id", "text"],
+      required: ["bot_name", "chat_id"],
     },
   },
   {
@@ -153,7 +157,8 @@ export function registerTools(
       case "send_telegram_message": {
         const botName = args?.bot_name as string;
         const chatId = args?.chat_id as number;
-        const text = args?.text as string;
+        const text = (args?.text as string) || "";
+        const filePath = args?.file_path as string | undefined;
 
         const bot = getBot(botName);
         if (!bot) {
@@ -164,25 +169,27 @@ export function registerTools(
           };
         }
 
-        if (!chatId || !text) {
+        if (!chatId || (!text && !filePath)) {
           return {
             content: [
-              { type: "text", text: "Error: chat_id and text are required" },
+              { type: "text", text: "Error: chat_id and either text or file_path are required" },
             ],
           };
         }
 
         try {
           onMessageSent?.(botName, chatId);
-          const sent = await bot.telegram.sendMessage(chatId, text);
+          const sent = filePath
+            ? await bot.telegram.sendDocument(chatId, filePath, text || undefined)
+            : await bot.telegram.sendMessage(chatId, text);
           logConversation({
             botName,
             direction: "outbound",
             chatId,
             messageId: typeof sent === "object" ? sent.message_id : undefined,
             chatType: typeof sent === "object" ? sent.chat?.type : undefined,
-            text,
-            meta: { via: "send_telegram_message" },
+            text: filePath ? `${text || ""}\n[document sent: ${filePath}]`.trim() : text,
+            meta: { via: "send_telegram_message", filePath },
           });
 
           // Finalize live status — agent has replied.
@@ -195,7 +202,7 @@ export function registerTools(
 
           return {
             content: [
-              { type: "text", text: `Message sent via ${botName} to chat ${chatId}` },
+              { type: "text", text: filePath ? `Document sent via ${botName} to chat ${chatId}: ${filePath}` : `Message sent via ${botName} to chat ${chatId}` },
             ],
           };
         } catch (err) {
