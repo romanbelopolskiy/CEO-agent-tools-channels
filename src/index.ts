@@ -51,8 +51,31 @@ function escapeTelegramHtml(text: string): string {
     .replace(/>/g, "&gt;");
 }
 
+function compactLiveStatus(text: string): string {
+  const lines = (text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const hudLine = [...lines]
+    .reverse()
+    .find((line) => /\b5h:[^\n]*\bwk:[^\n]*\bsn:[^\n]*·\s*ctx:\d+%/.test(line));
+
+  const activityLine = [...lines]
+    .reverse()
+    .find((line) =>
+      /^[✻✢✶✽✦✧✷✸✹●◐◑◒◓⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(line) ||
+      /\b(Perusing|Pondering|Thinking|Tinkering|Calling|Reading|Searching|Writing|Editing|Running)\b/.test(line)
+    );
+
+  if (activityLine && hudLine) return `${activityLine}\n  ${hudLine}`;
+  if (activityLine) return activityLine;
+  if (hudLine) return `✻ Working…\n  ${hudLine}`;
+  return text || "\u200b";
+}
+
 function formatStatusAsCodeBlock(text: string): string {
-  let raw = text || "\u200b";
+  let raw = compactLiveStatus(text);
   let escaped = escapeTelegramHtml(raw);
   const maxEscapedLength = STATUS_CODE_MAX_LENGTH - STATUS_CODE_WRAPPER_OVERHEAD;
 
