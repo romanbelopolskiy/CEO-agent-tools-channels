@@ -35,6 +35,23 @@ export interface TelegramDocument {
   file_size?: number;
 }
 
+export interface TelegramVoice {
+  file_id: string;
+  file_unique_id: string;
+  duration?: number;
+  mime_type?: string;
+  file_size?: number;
+}
+
+export interface TelegramAudio {
+  file_id: string;
+  file_unique_id: string;
+  duration?: number;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+
 export interface TelegramMessageEntity {
   type: string;
   offset: number;
@@ -52,6 +69,8 @@ export interface TelegramMessage {
   caption?: string;
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
+  voice?: TelegramVoice;
+  audio?: TelegramAudio;
   reply_to_message?: TelegramMessage;
   entities?: TelegramMessageEntity[];
   caption_entities?: TelegramMessageEntity[];

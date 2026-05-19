@@ -646,7 +646,7 @@ function startPolling(
           if (!update.message?.from) continue;
 
           const msg = update.message;
-          if (!msg.text && !msg.photo && !msg.document) continue;
+          if (!msg.text && !msg.photo && !msg.document && !msg.voice && !msg.audio) continue;
 
           const userId = msg.from!.id;
           const chatType = msg.chat.type || "private";
@@ -832,7 +832,7 @@ function startPolling(
 
 async function enrichMedia(
   telegram: TelegramClient,
-  msg: { photo?: any[]; document?: any; caption?: string; text?: string },
+  msg: { photo?: any[]; document?: any; voice?: any; audio?: any; caption?: string; text?: string },
   text: string,
   botName: string
 ): Promise<string> {
@@ -869,6 +869,42 @@ async function enrichMedia(
     } catch (err) {
       log(`[${botName}] Failed to download document: ${err}`);
       text = `[document: ${msg.document.file_name || "unknown"} - download failed]${text ? "\n" + text : ""}`;
+    }
+  }
+
+  if (msg.voice) {
+    try {
+      const voice = msg.voice;
+      const fileInfo = await telegram.getFile(voice.file_id);
+      const fileData = await telegram.downloadFile(fileInfo.file_path);
+      const ext = fileInfo.file_path.split(".").pop() || "ogg";
+      const tmpPath = `/tmp/tg-voice-${voice.file_unique_id}.${ext}`;
+      await fs.writeFile(tmpPath, fileData);
+      const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
+      const duration = voice.duration ? ` duration=${voice.duration}s` : "";
+      text = `[voice saved to ${tmpPath}${duration}${caption}]${text ? "\n" + text : ""}`;
+      log(`[${botName}] Voice saved: ${tmpPath}`);
+    } catch (err) {
+      log(`[${botName}] Failed to download voice: ${err}`);
+      text = `[voice - download failed]${text ? "\n" + text : ""}`;
+    }
+  }
+
+  if (msg.audio) {
+    try {
+      const audio = msg.audio;
+      const fileInfo = await telegram.getFile(audio.file_id);
+      const fileData = await telegram.downloadFile(fileInfo.file_path);
+      const fileName = audio.file_name || `audio.${fileInfo.file_path.split(".").pop() || "bin"}`;
+      const tmpPath = `/tmp/tg-audio-${audio.file_unique_id}-${fileName}`;
+      await fs.writeFile(tmpPath, fileData);
+      const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
+      const duration = audio.duration ? ` duration=${audio.duration}s` : "";
+      text = `[audio: ${fileName} saved to ${tmpPath}${duration}${caption}]${text ? "\n" + text : ""}`;
+      log(`[${botName}] Audio saved: ${tmpPath}`);
+    } catch (err) {
+      log(`[${botName}] Failed to download audio: ${err}`);
+      text = `[audio: ${msg.audio.file_name || "unknown"} - download failed]${text ? "\n" + text : ""}`;
     }
   }
 
