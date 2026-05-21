@@ -106,21 +106,32 @@ export class TelegramClient {
       body: params ? JSON.stringify(params) : undefined,
     });
 
+    let data: TelegramResponse<T> | null = null;
+    try {
+      data = (await res.json()) as TelegramResponse<T>;
+    } catch {
+      data = null;
+    }
+
     if (!res.ok) {
-      const errMsg = `Telegram API error: ${res.status} ${res.statusText}`;
+      const errMsg = `Telegram API error: ${res.status} ${res.statusText}${data?.description ? `: ${data.description}` : ""}`;
       debug(`API error: ${method} -> ${errMsg}`);
       throw new Error(errMsg);
     }
 
-    const data = (await res.json()) as TelegramResponse<T>;
-    if (!data.ok) {
-      const errMsg = `Telegram API error: ${data.description || "unknown"}`;
+    if (!data?.ok) {
+      const errMsg = `Telegram API error: ${data?.description || "unknown"}`;
       debug(`API error: ${method} -> ${errMsg}`);
       throw new Error(errMsg);
     }
 
     debug(`API ok: ${method}`);
     return data.result;
+  }
+
+  private isParseModeError(error: unknown): boolean {
+    const msg = error instanceof Error ? error.message : String(error);
+    return /can't parse entities|parse entities|parse mode|entity|markdown/i.test(msg);
   }
 
   async getMe(): Promise<TelegramUser> {
@@ -153,7 +164,15 @@ export class TelegramClient {
   ): Promise<TelegramMessage> {
     const params: Record<string, unknown> = { chat_id: chatId, text };
     if (parseMode) params.parse_mode = parseMode;
-    return this.request<TelegramMessage>("sendMessage", params);
+    try {
+      return await this.request<TelegramMessage>("sendMessage", params);
+    } catch (error) {
+      if (parseMode && this.isParseModeError(error)) {
+        debug("sendMessage parse_mode failed; retrying as plain text");
+        return this.request<TelegramMessage>("sendMessage", { chat_id: chatId, text });
+      }
+      throw error;
+    }
   }
 
   async sendDocument(
@@ -175,16 +194,29 @@ export class TelegramClient {
     }
 
     const res = await fetch(url, { method: "POST", body: form });
+    let body: TelegramResponse<TelegramMessage> | null = null;
+    try {
+      body = (await res.json()) as TelegramResponse<TelegramMessage>;
+    } catch {
+      body = null;
+    }
     if (!res.ok) {
-      const errMsg = `Telegram API error: ${res.status} ${res.statusText}`;
+      const errMsg = `Telegram API error: ${res.status} ${res.statusText}${body?.description ? `: ${body.description}` : ""}`;
       debug(`API error: sendDocument -> ${errMsg}`);
+      if (caption && parseMode && this.isParseModeError(errMsg)) {
+        debug("sendDocument caption parse_mode failed; retrying caption as plain text");
+        return this.sendDocument(chatId, filePath, caption, "");
+      }
       throw new Error(errMsg);
     }
 
-    const body = (await res.json()) as TelegramResponse<TelegramMessage>;
-    if (!body.ok) {
-      const errMsg = `Telegram API error: ${body.description || "unknown"}`;
+    if (!body?.ok) {
+      const errMsg = `Telegram API error: ${body?.description || "unknown"}`;
       debug(`API error: sendDocument -> ${errMsg}`);
+      if (caption && parseMode && this.isParseModeError(errMsg)) {
+        debug("sendDocument caption parse_mode failed; retrying caption as plain text");
+        return this.sendDocument(chatId, filePath, caption, "");
+      }
       throw new Error(errMsg);
     }
     debug("API ok: sendDocument");
@@ -207,7 +239,19 @@ export class TelegramClient {
       text,
     };
     if (parseMode) params.parse_mode = parseMode;
-    return this.request<TelegramMessage | boolean>("editMessageText", params);
+    try {
+      return await this.request<TelegramMessage | boolean>("editMessageText", params);
+    } catch (error) {
+      if (parseMode && this.isParseModeError(error)) {
+        debug("editMessageText parse_mode failed; retrying as plain text");
+        return this.request<TelegramMessage | boolean>("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text,
+        });
+      }
+      throw error;
+    }
   }
 
   async sendChatAction(chatId: number, action: string = "typing"): Promise<boolean> {
