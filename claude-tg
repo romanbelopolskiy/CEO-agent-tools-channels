@@ -73,11 +73,30 @@ if [[ -z "$CLI_BOT" ]]; then
   exit 1
 fi
 
-# Clean up any orphaned status-watcher from a previous crashed session
-pkill -f "status-watcher\.sh.*${CLI_BOT}" 2>/dev/null
+# Clean up any orphaned status-watcher from a previous crashed session.
+# Match bot as a command argument, not as a loose substring.
+pkill -f "status-watcher\\.sh .* ${CLI_BOT} " 2>/dev/null
 
 AGENT_DIR="$(pwd)"
 AGENT_DEFAULTS_PATH="$AGENT_DIR/$DEFAULTS_FILE"
+
+# Prevent duplicate Telegram Claude agents for the same bot/agent directory.
+# Historical failure mode on agents-central: tmux/shell died, but the util-linux
+# `script -q -c claude ... server:ceo-agent-tools-channels` wrapper was adopted by
+# PID 1 and kept answering Telegram alongside the new tmux-backed session.
+LOCK_DIR="${TMPDIR:-/tmp}/claude-tg-locks"
+mkdir -p "$LOCK_DIR"
+LOCK_FILE="$LOCK_DIR/${CLI_BOT}.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "Another claude-tg instance for bot '$CLI_BOT' is already starting/running; cleaning stale orphans and refusing duplicate start."
+  # Do not run --prestart here: the lock holder is the valid live instance.
+  # Only remove confirmed PPID=1 orphan wrappers.
+  "$(cd "$(dirname "${0:A}")" && pwd)/cleanup-agent-orphans.py" --kill >/dev/null 2>&1 || true
+  exit 0
+fi
+
+"$(cd "$(dirname "${0:A}")" && pwd)/cleanup-agent-orphans.py" --agent-dir "$AGENT_DIR" --prestart --kill >/dev/null 2>&1 || true
 
 # Load per-agent defaults if present
 if [[ -f "$AGENT_DEFAULTS_PATH" ]]; then

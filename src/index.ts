@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import http from "node:http";
-import * as fsSync from "node:fs";
 import { execFileSync } from "node:child_process";
 import { URL } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -19,6 +18,11 @@ import { log, debug, logConversation } from "./logger.js";
 import { TYPING_INTERVAL_MS, TYPING_TIMEOUT_MS, DEFAULT_SSE_PORT, STATUS_GC_INTERVAL_MS } from "./constants.js";
 import { StatusManager, loadTelemetryConfig, type VerbosityMode } from "./status-messages.js";
 import { maybeGate } from "./auto-compact.js";
+
+const OPENAI_TRANSCRIPTIONS_URL = process.env.TELEGRAM_STT_OPENAI_URL || "https://api.openai.com/v1/audio/transcriptions";
+const OPENAI_TRANSCRIPTIONS_MODEL = process.env.TELEGRAM_STT_MODEL || "whisper-1";
+const OPENAI_TRANSCRIPTIONS_LANGUAGE = process.env.TELEGRAM_STT_LANGUAGE || "ru";
+const OPENAI_TRANSCRIPTIONS_TIMEOUT_MS = Number(process.env.TELEGRAM_STT_TIMEOUT_MS || "120000");
 
 interface BotRuntime {
   ctx: BotContext;
@@ -335,8 +339,61 @@ function getBotAliases(botName: string, botsMap: Map<string, BotContext>): strin
   return [botName];
 }
 
-// --- Route channel message to matching SSE sessions ---
-function routeToSessions(
+function hasMatchingSseSession(botName: string, botsMap: Map<string, BotContext>): boolean {
+  const aliases = getBotAliases(botName, botsMap);
+  for (const [, session] of sseSessions) {
+    if (session.botName === null || aliases.includes(session.botName)) return true;
+  }
+  return false;
+}
+
+function startAgentSession(botName: string): boolean {
+  // Called only when no matching SSE session exists. If tmux is still present,
+  // it is disconnected from the bridge (for example after bridge restart), so
+  // replace it; otherwise /srv/agents/bin/start-agent.sh would no-op.
+  try {
+    execFileSync("tmux", ["has-session", "-t", botName], { timeout: 3000 });
+    execFileSync("tmux", ["kill-session", "-t", botName], { timeout: 5000 });
+    log(`[${botName}] wake-on-message replaced disconnected tmux session`);
+  } catch {}
+
+  try {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      execFileSync("/srv/agents/bin/start-agent.sh", [botName], { timeout: 45000, stdio: "pipe" });
+      try {
+        execFileSync("tmux", ["has-session", "-t", botName], { timeout: 3000, stdio: "ignore" });
+        log(`[${botName}] wake-on-message started tmux session`);
+        return true;
+      } catch {
+        log(`[${botName}] wake-on-message start attempt ${attempt} left no tmux session; retrying`);
+        execFileSync("sleep", [String(attempt)], { timeout: 5000, stdio: "ignore" });
+      }
+    }
+    log(`[${botName}] wake-on-message failed: start-agent returned but no tmux session exists`);
+    return false;
+  } catch (err) {
+    log(`[${botName}] wake-on-message failed to start session: ${err}`);
+    return false;
+  }
+}
+
+async function ensureSessionForDelivery(botName: string, botsMap: Map<string, BotContext>): Promise<boolean> {
+  if (hasMatchingSseSession(botName, botsMap)) return true;
+  startAgentSession(botName);
+
+  // Cold-starting Claude Code can take longer than 25s after idle reaping
+  // (plugin init, auto-update checks, dev-channel confirmation). Keep the
+  // polling loop alive long enough so the first Telegram message is not dropped.
+  const deadline = Date.now() + Number(process.env.TELEGRAM_WAKE_WAIT_MS || "90000");
+  while (Date.now() < deadline) {
+    if (hasMatchingSseSession(botName, botsMap)) return true;
+    await sleep(500);
+  }
+  return hasMatchingSseSession(botName, botsMap);
+}
+
+// --- Route channel message to matching SSE sessions; cold-start the agent if idle reaper stopped it. ---
+async function routeToSessions(
   botsMap: Map<string, BotContext>,
   botName: string,
   msg: any,
@@ -344,15 +401,18 @@ function routeToSessions(
   isReplyToBot: boolean
 ) {
   const chatId = msg.chat?.id;
+  const ready = await ensureSessionForDelivery(botName, botsMap);
   const aliases = getBotAliases(botName, botsMap);
 
   let delivered = false;
-  for (const [, session] of sseSessions) {
-    if (session.botName === null || aliases.includes(session.botName)) {
-      // Use the session's own bot name so the agent sees its expected bot
-      const effectiveBotName = session.botName || botName;
-      emitChannelMessage(session.server, effectiveBotName, msg, botMentioned, isReplyToBot);
-      delivered = true;
+  if (ready) {
+    for (const [, session] of sseSessions) {
+      if (session.botName === null || aliases.includes(session.botName)) {
+        // Use the session's own bot name so the agent sees its expected bot
+        const effectiveBotName = session.botName || botName;
+        emitChannelMessage(session.server, effectiveBotName, msg, botMentioned, isReplyToBot);
+        delivered = true;
+      }
     }
   }
 
@@ -374,7 +434,11 @@ function routeToSessions(
   }
 
   if (!delivered) {
-    log(`No SSE session for bot "${botName}" (aliases: ${aliases.join(",")}), message dropped`);
+    log(`No SSE session for bot "${botName}" after wake attempt (aliases: ${aliases.join(",")}); message not delivered`);
+    if (chatId) {
+      const bot = botsMap.get(botName);
+      bot?.telegram.sendMessage(chatId, "Не смог поднять сессию агента. DevOps уже может проверить по логам.").catch(() => {});
+    }
   }
 }
 
@@ -830,6 +894,57 @@ function startPolling(
   });
 }
 
+async function transcribeAudioFile(filePath: string, botName: string): Promise<string | null> {
+  if (process.env.TELEGRAM_STT_ENABLED === "0") return null;
+
+  const apiKey = process.env.VOICE_TOOLS_OPENAI_KEY || process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    log(`[${botName}] OpenAI STT skipped: missing VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY`);
+    return null;
+  }
+
+  const fs = await import("node:fs/promises");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OPENAI_TRANSCRIPTIONS_TIMEOUT_MS);
+
+  try {
+    const data = await fs.readFile(filePath);
+    const fileName = filePath.split("/").pop() || "audio.ogg";
+    const form = new FormData();
+    form.append("file", new Blob([data]), fileName);
+    form.append("model", OPENAI_TRANSCRIPTIONS_MODEL);
+    if (OPENAI_TRANSCRIPTIONS_LANGUAGE) form.append("language", OPENAI_TRANSCRIPTIONS_LANGUAGE);
+
+    const res = await fetch(OPENAI_TRANSCRIPTIONS_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      log(`[${botName}] OpenAI STT failed: HTTP ${res.status} ${res.statusText} ${body.slice(0, 500)}`);
+      return null;
+    }
+
+    const json = (await res.json()) as { text?: string; error?: unknown };
+    const transcript = (json.text || "").trim();
+    if (!transcript) {
+      log(`[${botName}] OpenAI STT completed with empty transcript for ${filePath}`);
+      return null;
+    }
+
+    log(`[${botName}] OpenAI STT ok for ${filePath} (${OPENAI_TRANSCRIPTIONS_MODEL})`);
+    return transcript;
+  } catch (err) {
+    log(`[${botName}] OpenAI STT exec failed for ${filePath}: ${(err as Error).message}`);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function enrichMedia(
   telegram: TelegramClient,
   msg: { photo?: any[]; document?: any; voice?: any; audio?: any; caption?: string; text?: string },
@@ -882,7 +997,11 @@ async function enrichMedia(
       await fs.writeFile(tmpPath, fileData);
       const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
       const duration = voice.duration ? ` duration=${voice.duration}s` : "";
-      text = `[voice saved to ${tmpPath}${duration}${caption}]${text ? "\n" + text : ""}`;
+      const transcript = await transcribeAudioFile(tmpPath, botName);
+      const voicePrefix = transcript
+        ? `[voice transcript${duration}; audio saved to ${tmpPath}${caption}]\n${transcript}`
+        : `[voice saved to ${tmpPath}${duration}; transcript unavailable${caption}]`;
+      text = `${voicePrefix}${text ? "\n" + text : ""}`;
       log(`[${botName}] Voice saved: ${tmpPath}`);
     } catch (err) {
       log(`[${botName}] Failed to download voice: ${err}`);
@@ -900,7 +1019,11 @@ async function enrichMedia(
       await fs.writeFile(tmpPath, fileData);
       const caption = msg.caption ? ` Caption: "${msg.caption}"` : "";
       const duration = audio.duration ? ` duration=${audio.duration}s` : "";
-      text = `[audio: ${fileName} saved to ${tmpPath}${duration}${caption}]${text ? "\n" + text : ""}`;
+      const transcript = await transcribeAudioFile(tmpPath, botName);
+      const audioPrefix = transcript
+        ? `[audio transcript: ${fileName}${duration}; audio saved to ${tmpPath}${caption}]\n${transcript}`
+        : `[audio: ${fileName} saved to ${tmpPath}${duration}; transcript unavailable${caption}]`;
+      text = `${audioPrefix}${text ? "\n" + text : ""}`;
       log(`[${botName}] Audio saved: ${tmpPath}`);
     } catch (err) {
       log(`[${botName}] Failed to download audio: ${err}`);

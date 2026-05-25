@@ -14,13 +14,18 @@ SSE_HOST="${4:-http://127.0.0.1:3200}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RENDER="$SCRIPT_DIR/render-tui.py"
+# Use system Python by default so agent-local virtualenvs do not shadow renderer deps.
+PYTHON_BIN="${STATUS_WATCHER_PYTHON:-/usr/bin/python3}"
+if [ ! -x "$PYTHON_BIN" ]; then
+  PYTHON_BIN="$(command -v python3)"
+fi
 WATCHER_LOG="${STATUS_WATCHER_LOG:-/tmp/status-watcher-${BOT_NAME}.log}"
 RENDER_ERROR_SENT=0
 
 post_status() {
   local text="$1"
   local json_text
-  json_text=$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" <<< "$text")
+  json_text=$("$PYTHON_BIN" -c "import json,sys; print(json.dumps(sys.stdin.read()))" <<< "$text")
   curl -sS -X POST "$SSE_HOST/status-feed" \
     -H 'Content-Type: application/json' \
     -d "{\"botName\":\"$BOT_NAME\",\"chatId\":$CHAT_ID,\"text\":$json_text}" \
@@ -34,7 +39,7 @@ while true; do
   [ -s "$LOGFILE" ] || continue
 
   ERRFILE=$(mktemp "/tmp/status-render-${BOT_NAME}.XXXXXX")
-  RAW=$(python3 "$RENDER" "$LOGFILE" 80 2>"$ERRFILE")
+  RAW=$("$PYTHON_BIN" "$RENDER" "$LOGFILE" 80 2>"$ERRFILE")
   RC=$?
   if [[ $RC -ne 0 ]]; then
     ERR=$(tail -20 "$ERRFILE" | tr -d '\r')
