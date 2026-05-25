@@ -1,59 +1,51 @@
-# Architecture and Operations Guide
+# MCP Bridge Contract
 
-This guide describes the bridge architecture without exposing any private deployment values. Use placeholders in committed examples. Real tokens, user IDs, chat IDs, hostnames, internal URLs, and absolute private paths belong only in local runtime config.
+This document defines how Claude Code agents interact with the `ceo-agent-tools-channels` MCP bridge. It is intentionally limited to the agent/MCP boundary.
 
-## Components
-
-```text
-Telegram Bot API
-  <-> shared Node bridge process
-      - polls configured bots
-      - enforces access rules
-      - exposes MCP/SSE endpoints
-      - forwards messages into matching Claude sessions
-      - sends replies/status back to Telegram
-  <-> Claude Code agent sessions
-      - one session per bot identity
-      - launched by claude-tg
-      - connected by MCP/SSE
-```
-
-## File layout
+## Boundary
 
 ```text
-src/index.ts             Bridge entrypoint: HTTP server, polling, routing, wake-on-message, media enrichment
-src/telegram.ts          Telegram API client wrapper
-src/tools.ts             MCP tools exposed to agents
-src/status-messages.ts   Live Telegram status lifecycle
-src/config.ts            Local bot registry loader
-src/access.ts            Pairing and allowlist logic
-src/permissions.ts       Permission forwarding
-src/channel.ts           MCP channel emitters
-src/logger.ts            Shared logging
-src/constants.ts         Runtime constants
-claude-tg                Agent launcher
-cleanup-agent-orphans.py Duplicate/orphan process cleanup
-status-watcher.sh        Live TUI renderer poster
-render-tui.py            TUI-to-text renderer
+Claude Code agent
+  <-> MCP/SSE bridge (`ceo-agent-tools-channels`)
+  <-> Telegram Bot API
 ```
 
-## Configuration model
+Agents interact only with the bridge. The bridge interacts with Telegram.
 
-### Bot registry
+## Agent responsibilities
 
-Local private file, not committed:
+- Connect to the bridge using MCP/SSE with `bot=<BOT_NAME>`.
+- Receive incoming Telegram messages from the bridge as channel messages.
+- Reply through bridge MCP tools.
+- Treat bridge-provided transcripts and media file references as normal user input.
+- Keep replies user-facing; do not expose internal IDs, raw metadata, logs, stack traces, or bridge diagnostics unless explicitly asked for debugging.
 
-```json
-{
-  "<BOT_NAME>": { "token": "<TELEGRAM_BOT_TOKEN>" }
-}
-```
+## Bridge responsibilities
 
-The bridge loads bot identities from this registry. Multiple names may share the same token when intentional; polling is deduplicated by token.
+- Store and use bot credentials in local private config.
+- Poll Telegram and route each update to the matching MCP/SSE session.
+- Enforce access policy before forwarding user messages to agents.
+- Forward permission requests when needed.
+- Send agent replies to Telegram.
+- Handle Telegram formatting fallback and document/media delivery.
+- Download voice/audio/files and pass safe local references to agents.
+- Optionally transcribe voice/audio before forwarding the message to the agent.
+- Manage live status messages.
+- Prevent duplicate live sessions for the same bot where supported by the launcher.
 
-### Agent MCP config
+## Prohibited for agents
 
-Each agent has an MCP config like:
+Agents must not:
+
+- connect to Telegram directly;
+- store or print bot tokens;
+- ask users for bot tokens in normal operation;
+- bypass bridge access control;
+- implement their own Telegram polling or sending loop;
+- send raw private metadata back to users;
+- commit local deployment config, logs, transcripts, tokens, IDs, or private paths.
+
+## MCP/SSE config shape
 
 ```json
 {
@@ -66,131 +58,34 @@ Each agent has an MCP config like:
 }
 ```
 
-Agents only see bridge tools. They do not receive bot tokens and must not implement direct Telegram clients.
+## Bot registry shape
 
-### Per-agent launcher defaults
-
-Optional local file in the agent workspace:
+The bot registry is local private config and must not be committed:
 
 ```json
 {
-  "model": "<MODEL_ALIAS>",
-  "effort": "<EFFORT_LEVEL>",
-  "telegramTelemetry": "status"
+  "<BOT_NAME>": { "token": "<TELEGRAM_BOT_TOKEN>" }
 }
 ```
 
-## Message routing
+## Inbound message contract
 
-1. Bridge receives Telegram update from a configured bot polling loop.
-2. Access policy is checked for the sender/chat.
-3. Media is downloaded by the bridge if present.
-4. Voice/audio is transcribed by the bridge if a speech-to-text provider is configured.
-5. Bridge resolves aliases for the bot name.
-6. If a matching SSE session exists, the message is emitted into that session.
-7. If no matching session exists, wake-on-message starts or replaces the matching tmux session, waits for SSE reconnect, then emits the message.
-8. If wake fails, the bridge sends a short failure message and logs diagnostics.
+The bridge may include:
 
-## Reply routing
+- message text;
+- chat metadata;
+- sender metadata;
+- reply/mention flags;
+- local file path for downloaded media;
+- transcript text for voice/audio when transcription is configured;
+- marker that transcript is unavailable when transcription fails or is disabled.
 
-Agents reply through MCP tools exposed by the bridge. The bridge performs actual Telegram API calls. This preserves the isolation boundary:
+Agents should use this data only to complete the user task and route the reply through bridge tools.
 
-- token handling stays in the bridge;
-- agents do not store or read bot tokens;
-- Telegram parse-mode fallback is centralized;
-- live status messages are finalized when a user-facing reply is sent.
+## Outbound reply contract
 
-## Wake-on-message lifecycle
+Agents should send concise final replies through the bridge MCP send tool. The bridge owns final Telegram delivery and error handling.
 
-Wake-on-message exists so idle/stopped agent sessions can still receive the first Telegram message reliably.
+## Privacy rule
 
-Algorithm:
-
-1. Check if any SSE session matches `<BOT_NAME>` or its aliases.
-2. If absent, check for a stale tmux session with the same name.
-3. Replace disconnected tmux if needed.
-4. Call the local start-agent hook with `<BOT_NAME>`.
-5. Verify that tmux session exists.
-6. Poll for SSE reconnect until timeout.
-7. Deliver the original Telegram message only after reconnect.
-8. Fail loudly in logs if the session cannot be started.
-
-## Duplicate-session protection
-
-`claude-tg` uses a per-bot lock. A second launcher for the same bot refuses to create another live Claude session.
-
-Before launch, `cleanup-agent-orphans.py` removes stale bridge-backed Claude processes only when they match safe criteria:
-
-- orphaned wrapper adopted by PID 1; or
-- same exact agent directory during prestart cleanup.
-
-Do not broaden cleanup patterns without deterministic checks. Avoid killing by loose bot-name substring alone.
-
-## Media and transcription boundary
-
-The bridge may download Telegram media and may call an externally configured speech-to-text provider. The resulting agent message contains either:
-
-```text
-[voice transcript; audio saved to <LOCAL_TEMP_FILE>]
-<transcript text>
-```
-
-or:
-
-```text
-[voice saved to <LOCAL_TEMP_FILE>; transcript unavailable]
-```
-
-Agents should treat the transcript as user input. Agents should not call Telegram media APIs directly.
-
-## Live status boundary
-
-`status-watcher.sh` follows a local Claude TUI log, renders it through `render-tui.py`, and posts compact text to the bridge status endpoint.
-
-Operational rules:
-
-- Use system Python by default for renderer dependencies.
-- Restart the affected agent session after changing watcher or renderer scripts.
-- Do not expose raw logs to Telegram; status output should stay compact and user-safe.
-
-## Restart matrix
-
-| Change | Build | Restart bridge | Restart agent session |
-|---|---:|---:|---:|
-| `src/**/*.ts` | yes | yes | no |
-| local bot registry | no | yes | only new/changed agents |
-| `claude-tg` | no | no | yes |
-| `cleanup-agent-orphans.py` | no | no | yes before next launch |
-| `status-watcher.sh` / `render-tui.py` | no | no | yes |
-| one agent instruction/config | no | no | that agent only |
-
-## Validation commands
-
-```bash
-npm run build
-python3 -m py_compile cleanup-agent-orphans.py
-zsh -n claude-tg
-bash -n status-watcher.sh
-./cleanup-agent-orphans.py --json
-```
-
-After deployment, verify privately in the target environment:
-
-```bash
-curl -sf <SSE_BASE_URL>/health
-```
-
-## Documentation sanitization rules
-
-Committed docs must not contain:
-
-- real bot tokens or API keys;
-- token variable names tied to a private deployment;
-- real Telegram user IDs or chat IDs;
-- emails, phone numbers, private handles;
-- private hostnames, internal IPs, or deployment URLs;
-- private absolute paths;
-- private customer, employee, or company names;
-- raw logs, raw message history, or transcripts.
-
-Use placeholders such as `<BOT_NAME>`, `<SSE_BASE_URL>`, `<AGENT_DIR>`, `<LOCAL_CONFIG_PATH>`, and `<TELEGRAM_BOT_TOKEN>`.
+Repository files must use placeholders only. Do not commit real credentials, real user/chat IDs, private URLs, private hostnames, private paths, raw chats, raw logs, screenshots, transcripts, or private personal/company names.

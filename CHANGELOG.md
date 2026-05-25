@@ -8,8 +8,9 @@ This changelog is intentionally sanitized. Historical operational entries that c
 
 ## Unreleased
 
-- Documentation now describes the hardened bridge flow generically: shared MCP/SSE bridge, agent isolation boundary, wake-on-message, duplicate-session cleanup, bridge-side media transcription, and live status rendering.
-- Sanitized public docs and package metadata to avoid real deployment paths, private hostnames, personal contact details, bot identities, user/chat IDs, and token examples. Use placeholders only.
+- Documentation now focuses only on the agent-to-MCP bridge contract.
+- Removed private deployment procedure details from committed instructions.
+- Sanitized docs and package metadata to use placeholders only.
 
 ## v3.3.3
 
