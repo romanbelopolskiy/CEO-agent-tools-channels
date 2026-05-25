@@ -8,7 +8,7 @@ function debug(msg: string) { if (DEBUG) process.stderr.write(`[channel:debug] $
  * Emit a channel notification to Claude Code.
  *
  * Claude Code receives this as:
- * <channel source="bot-name" chat_id="123" user_id="456" username="roman">
+ * <channel source="bot-name" chat_id="123" user_id="456" username="operator">
  *   message text here
  * </channel>
  *

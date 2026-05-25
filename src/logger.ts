@@ -3,6 +3,7 @@
  * Removes duplicate debug/log functions from index.ts, tools.ts, telegram.ts.
  */
 import fs from "node:fs";
+import os from "node:os";
 
 const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
 const LOG_FILE = process.env.MCP_LOG_FILE;
@@ -35,7 +36,7 @@ export interface ConversationLogEvent {
   meta?: Record<string, unknown>;
 }
 
-const CONVERSATION_LOG_DIR = process.env.CONVERSATION_LOG_DIR || "/srv/agents/logs/telegram-conversations";
+const CONVERSATION_LOG_DIR = process.env.CONVERSATION_LOG_DIR || `${os.tmpdir()}/telegram-conversations`;
 
 export function logConversation(event: ConversationLogEvent): void {
   try {

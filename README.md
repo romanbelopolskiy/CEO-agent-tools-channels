@@ -1,693 +1,202 @@
-# CEO Agent Tools & Channels
+# CEO Agent Tools Channels
 
-> Fork of the official [Anthropic Telegram Channel Plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram), extended for multi-agent workflows.
+Shared MCP/SSE bridge for connecting isolated Claude Code agent sessions to Telegram chats.
 
-Multi-agent toolkit for startup founders. Manage isolated Claude Code agents through separate Telegram chats — each with its own skills, tools, and personality.
+This repository intentionally keeps documentation generic. Do not commit real bot tokens, API keys, user IDs, chat IDs, private hostnames, local absolute paths, customer names, or personal contact details.
 
-**Author:** Roman Belopolskiy, CEO [4sell.ai](https://4sell.ai)
+## Current runtime model
 
-## What's different from the official plugin
-
-The [official `telegram@claude-plugins-official`](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram) plugin stores the bot token globally — one token per machine. This project solves that:
-
-| | Official plugin | This project |
-|---|---|---|
-| Bot token | Global (one per machine) | Per-bot registry (`~/.claude/telegram-bots.json`) |
-| Multiple bots | Not supported | Run N bots in parallel |
-| Runtime | Bun | Node.js >= 18 |
-| Telegram lib | Grammy | Pure fetch (zero deps) |
-| Config | `/telegram:configure` | `claude-tg` launcher with interactive bot selection |
-| Isolation | Shared state | Each agent has its own context |
-| Process cleanup | Zombie processes on crash | Auto-exit on stdin close / signals |
-| Pairing | Per-session | Per-bot persistent access lists |
-| Authorization | Pairing flow only | Pairing flow OR direct allowlist file (no interaction) |
-| Media support | Text only | Photos and documents (saved to `/tmp/`, path forwarded to agent) |
-| Agent creation | Manual | `skills/spawn-agent` — automated full setup |
-
-## Why this exists
-
-Running a startup means juggling SMM, development, analytics, ops — all at once. AI agents help, but managing them through a single Claude Code terminal or a cluttered web UI is painful. Too many context switches, too many wasted tokens.
-
-This project was born out of frustration with managing agents through a single interface. The idea is simple: **one Telegram chat = one agent with its own isolated context**. You text your SMM bot — it writes posts. You text your dev bot — it ships code. No cross-contamination, no token waste, no cognitive overhead.
-
-Built on top of [Claude Code Channels](https://docs.anthropic.com/en/docs/claude-code/channels) — a feature that lets external systems push messages into a running Claude Code session.
-
-## How it works
-
-```
-You (Telegram)
-     │
-     ├── @smm_bot        ──►  Claude Code session #1  (CLAUDE.md: SMM skills)
-     ├── @dev_bot         ──►  Claude Code session #2  (CLAUDE.md: frontend dev)
-     └── @senior_dev_bot  ──►  Claude Code session #3  (CLAUDE.md: architecture + deploy)
+```text
+Telegram user
+  -> Telegram Bot API
+  -> one shared bridge process
+  -> MCP/SSE channel for the matching bot name
+  -> one Claude Code session per agent
+  -> responses go back through bridge tools only
 ```
 
-Under the hood (**SSE mode** — recommended):
+Key rules:
 
+- One long-lived bridge process polls all configured Telegram bots.
+- Each Claude Code agent connects to the bridge over MCP/SSE with a `bot=<BOT_NAME>` selector.
+- Claude agents must not connect to Telegram directly and must not store bot tokens in their own workspaces.
+- The bridge owns Telegram delivery, pairing/allowlist checks, permission forwarding, live status messages, and media download/transcription handoff.
+- Agent sessions run separately, usually inside a tmux session whose name matches the bot name.
+- If an idle agent has no active SSE connection, the bridge can wake the matching tmux session through the local start-agent hook, then deliver the first message after the session reconnects.
+
+## What changed in the hardened bridge flow
+
+### Duplicate-session prevention
+
+`claude-tg` now protects each bot with a local lock. Before launching a new agent session it runs `cleanup-agent-orphans.py` for the current agent directory.
+
+The cleanup script only targets confirmed stale bridge-backed Claude processes:
+
+- orphaned `script(1)` wrappers adopted by PID 1;
+- or, during prestart, an already-running bridge Claude process for the exact same agent directory.
+
+It should not kill unrelated tmux sessions, unrelated Claude processes, or headless system workers.
+
+### Wake-on-message
+
+When Telegram receives a valid user message but no matching SSE session exists:
+
+1. The bridge checks aliases for the configured bot name.
+2. If a stale/disconnected tmux session exists for that bot, it is replaced.
+3. The bridge calls the configured local start-agent hook.
+4. It waits for the SSE session to reconnect.
+5. Only then does it forward the Telegram message into Claude Code.
+6. If the agent cannot be started, the bridge sends a short user-facing failure message and logs the reason.
+
+### Voice/audio handling
+
+Voice and audio messages are downloaded by the bridge and saved to a temporary local file. If speech-to-text is configured in the bridge environment, the bridge sends the transcript plus the local audio path into the agent message. If transcription is unavailable, the agent receives the saved file path and a clear “transcript unavailable” marker.
+
+Do not implement speech-to-text inside individual agents. Keep media handling centralized in the bridge.
+
+### Live status rendering
+
+`status-watcher.sh` uses the system Python by default so agent-local virtual environments do not break renderer dependencies. It renders the Claude TUI log into compact plain text and posts it to the bridge status endpoint.
+
+## Safe configuration examples
+
+All sensitive values below are placeholders. Replace them only in local private config files, never in committed docs.
+
+### Bot registry
+
+The bridge reads a local bot registry file. Shape:
+
+```json
+{
+  "<BOT_NAME>": { "token": "<TELEGRAM_BOT_TOKEN>" }
+}
 ```
-                                                    ┌──  Claude Code session #1  (?bot=smm)
-Telegram Bot API  ◄── long polling ──  SSE Server  ─┼──  Claude Code session #2  (?bot=devops)
-                  ── send_message ──►  (port 3200)  └──  Claude Code session #3  (?bot=senior)
-```
 
-1. A **single shared SSE server** polls all Telegram bots and routes messages
-2. Each Claude Code session connects via SSE URL with `?bot=NAME` — receives only messages for its bot
-3. When you send a message in Telegram, it's routed to the correct agent session
-4. **Typing indicator** — Telegram shows "typing..." while the agent is processing your message
-5. Bots sharing the same token are polled once (no 409 Conflict errors)
-6. Permission requests (tool approvals) are forwarded to Telegram — approve or deny from your phone
+Rules:
 
-**Stdio mode** is still supported for single-bot setups (backward compatible).
+- Keep this file outside git.
+- Never paste real tokens into commits, issues, screenshots, logs, or docs.
+- If several bot names intentionally share the same token, the bridge deduplicates polling.
 
-## Quick start
+### Agent MCP config
 
-### 1. Create a Telegram bot
-
-Open [@BotFather](https://t.me/BotFather) in Telegram, run `/newbot`, and save the token.
-
-### 2. Install
-
-```bash
-git clone https://github.com/romanbelopolskiy/CEO-agent-tools-channels.git
-cd CEO-agent-tools-channels
-npm install
-npm run build
-```
-
-### 3. Start the SSE server
-
-```bash
-PORT=3200 TRANSPORT=sse node dist/index.js
-```
-
-Or install as a launchd service (macOS — auto-start + keepalive):
-
-```bash
-cp examples/com.ceo-agent-tools.channels-sse.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
-```
-
-Verify: `curl http://127.0.0.1:3200/health`
-
-### 4. Configure your agent
-
-Add to your agent's `.mcp.json`:
+Each agent workspace needs an MCP/SSE entry pointing to the shared bridge:
 
 ```json
 {
   "mcpServers": {
     "ceo-agent-tools-channels": {
       "type": "sse",
-      "url": "http://127.0.0.1:3200/sse?bot=devops"
+      "url": "<SSE_BASE_URL>/sse?bot=<BOT_NAME>"
     }
   }
 }
 ```
 
-### 5. Launch the agent
+Use a private local base URL in real deployments. Do not commit private hostnames, internal IPs, or chat-specific URLs.
 
-```bash
-cd ~/agents/devops
-claude-tg
-# Auto-detects bot name from directory, connects to SSE server
-```
+### Per-agent defaults
 
-Or use `claude-tg --bot devops` from any directory.
+Optional per-agent launcher defaults:
 
-**Alternative: Interactive mode** — run `claude-tg` and pick a bot from the list.
-
-> **tmux requirement for `/stop`:** `claude-tg` must run inside a tmux session whose name matches the bot name (e.g. `tmux new-session -s devops`). The `/stop` command sends ESC via `tmux send-keys` — it has no effect if there is no matching tmux session.
-
-#### launchd PATH requirement (macOS Apple Silicon)
-
-If you run the SSE server via launchd, add `/opt/homebrew/bin` to `EnvironmentVariables` in your plist (`~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist`). launchd's default PATH does not include Homebrew, so `tmux` (needed for `/stop`) is not resolvable without it:
-
-```xml
-<key>EnvironmentVariables</key>
-<dict>
-  <key>PATH</key>
-  <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-  <!-- other vars -->
-</dict>
-```
-
-Without this fix, `/stop` fails with `ENOENT` when trying to call `tmux`.
-
-### 5. Authorize your Telegram account
-
-There are two ways to authorize yourself:
-
-**Option A — Interactive pairing (default)**
-
-1. Send any message to your bot in Telegram
-2. The bot replies with a 6-character pairing code
-3. In Claude Code, say: `pair code abc123`
-4. The bot sends a confirmation: "Bot authorized under name devops"
-5. Done — your messages now reach Claude Code
-
-**Option B — Direct allowlist (no pairing required)**
-
-Faster for multi-agent setups where you're creating many bots at once. Bypass the pairing flow by writing the access file directly:
-
-```bash
-cat > ~/.claude/telegram-access-{botname}.json << 'EOF'
+```json
 {
-  "policy": "allowlist",
-  "allowedUsers": [YOUR_TELEGRAM_USER_ID],
-  "pendingPairs": {}
+  "model": "<CLAUDE_MODEL_ALIAS>",
+  "effort": "<EFFORT_LEVEL>",
+  "telegramTelemetry": "status"
 }
-EOF
 ```
 
-Replace `{botname}` with your bot name from the registry (e.g. `devops`, `smm`) and `YOUR_TELEGRAM_USER_ID` with your Telegram user ID.
+`telegramTelemetry` values:
 
-**Finding your user ID:** send a message to [@userinfobot](https://t.me/userinfobot) — it replies with your ID.
+- `silent` — no live status message;
+- `status` — compact live status updates;
+- `verbose` — more detailed status updates for debugging.
 
-This file is read at startup. No restart needed if the agent isn't running yet — just create the file before launching.
+## Operating the bridge
 
-## Runtime dependencies
-
-Live Telegram status streaming requires both Node dependencies and the Python TUI renderer dependency:
+### Build
 
 ```bash
 npm ci --ignore-scripts
-sudo apt-get install -y python3-pyte
-```
-
-If `python3-pyte` is missing, `status-watcher.sh` cannot run `render-tui.py`, so the initial Telegram status message may appear but it will not update with the Claude session output.
-
-## Operations: restart after code changes
-
-**TL;DR decision:** rebuilt `src/*.ts`? → bounce SSE. Edited an agent's `CLAUDE.md` / `render-tui.py` / `status-watcher.sh`? → bounce that agent's tmux. Touched the launchd plist? → `bootout` + `bootstrap` (not `kickstart`).
-
-The SSE server is one launchd-managed Node process (`com.ceo-agent-tools.channels-sse`) that brokers all Telegram traffic, evaluates `tryHandleCommand` (slash-passthrough, `/stop`, `/status`, `/compact`), and serves MCP tools to every agent CLI. Per-agent Claude Code CLIs run in their own tmux sessions (`tmux new-session -s <botName> 'claude-tg'`), each with a `status-watcher.sh` child for the live TG status stream.
-
-### After editing `src/*.ts` (99% of changes)
-
-```bash
-cd ~/CEO-agent-tools-channels
 npm run build
-launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse
-sleep 0.5 && curl -sf http://127.0.0.1:3200/health && echo " ✅"
 ```
 
-`kickstart -k` terminates the current Node process and lets launchd respawn it (required because `KeepAlive=true`). Agent tmux sessions **keep running** — the MCP SDK reconnects to SSE automatically in ~1–2s.
-
-### After editing the launchd plist
-
-`kickstart` does NOT reload a changed plist. Do:
+### Start bridge in development
 
 ```bash
-launchctl bootout  gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
-curl -sf http://127.0.0.1:3200/health && echo " ✅"
+TRANSPORT=sse PORT=<PORT> node dist/index.js
 ```
 
-### After editing an agent's config (`CLAUDE.md`, `.mcp.json`, `.claude-tg.json`, `render-tui.py`, `status-watcher.sh`)
-
-Only the agent's tmux session needs to bounce. SSE stays up.
+Health check:
 
 ```bash
-# preferred: attach, exit the CLI, relaunch (keeps tmux scrollback)
-tmux attach -t devops
-#   in the pane: Ctrl-C if a turn is running, then /exit (or Ctrl-D)
-#   claude-tg --effort max
-# detach: Ctrl-B d
-
-# cold restart (nukes tmux):
-tmux kill-session -t devops 2>/dev/null
-( cd ~/agents/devops && tmux new-session -d -s devops 'claude-tg --effort max' )
+curl -sf <SSE_BASE_URL>/health
 ```
 
-### Restart every agent tmux at once
+### Start an agent session
+
+From an agent workspace:
 
 ```bash
-for s in $(tmux ls -F '#S' 2>/dev/null); do
-  case "$s" in ceo-tools|qa-*) continue;; esac
-  tmux kill-session -t "$s"
-done
-for bot in devops fullstack frontend changelog smm trends network \
-           company-pulse meet finance jira-admin erp-admin engage; do
-  [[ -d ~/agents/$bot ]] && \
-    ( cd ~/agents/$bot && tmux new-session -d -s "$bot" 'claude-tg --effort max' )
-done
+tmux new-session -d -s <BOT_NAME> 'claude-tg --bot <BOT_NAME>'
 ```
 
-### Full reload (after a `git pull` that touched both layers)
+The tmux session name should match `<BOT_NAME>` so bridge commands and lifecycle scripts can find the right process.
+
+### Restart decision table
+
+- Edited `src/**/*.ts`: run `npm run build`, then restart the bridge process.
+- Edited `claude-tg`: restart affected agent tmux sessions.
+- Edited `status-watcher.sh` or `render-tui.py`: restart affected agent tmux sessions.
+- Changed local bot registry: restart the bridge process.
+- Changed one agent’s instructions/config: restart only that agent session.
+
+### Cleanup check
+
+Dry-run orphan detection:
 
 ```bash
-cd ~/CEO-agent-tools-channels && npm run build && \
-  launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse && \
-  sleep 0.5 && curl -sf http://127.0.0.1:3200/health && echo " SSE ✅"
-
-for s in $(tmux ls -F '#S' 2>/dev/null); do
-  case "$s" in ceo-tools|qa-*) continue;; esac
-  tmux kill-session -t "$s"
-done
-for bot in devops fullstack frontend changelog smm trends network \
-           company-pulse meet finance jira-admin erp-admin engage; do
-  [[ -d ~/agents/$bot ]] && \
-    ( cd ~/agents/$bot && tmux new-session -d -s "$bot" 'claude-tg --effort max' )
-done
+./cleanup-agent-orphans.py --json
 ```
 
-### "I edited code, rebuilt, sent a command in TG — nothing changed"
-
-Run these checks in order:
+Prestart cleanup for one agent directory:
 
 ```bash
-ls -lct dist/index.js src/index.ts | head -2       # dist newer than src? if not: npm run build
-launchctl list | grep com.ceo-agent-tools          # running? PID in first column
-tail -20 /tmp/ceo-agent-tools-channels.log         # startup errors?
-# process start time vs dist mtime — if process is older, you forgot to kickstart:
-ps -o lstart -p $(launchctl list | awk '/com.ceo-agent-tools/ {print $1}')
-stat -f '%Sm' dist/index.js
+./cleanup-agent-orphans.py --agent-dir <AGENT_DIR> --prestart --kill --json
 ```
 
-The full restart decision table and bare-metal dev-run instructions live in [`ARCHITECTURE.md`](ARCHITECTURE.md#how-to-start--stop--restart).
+Use `--kill` only when the matching process is confirmed stale or belongs to the same agent being relaunched.
 
-## Bot registry
+## Security and privacy checklist before commit
 
-Bots are stored in `~/.claude/telegram-bots.json`:
-
-```json
-{
-  "devops": { "token": "123456:ABC..." },
-  "smm": { "token": "789012:DEF..." },
-  "senior": { "token": "345678:GHI..." }
-}
-```
-
-Each bot gets its own access list at `~/.claude/telegram-access-{name}.json`.
-
-You can add bots manually to the JSON file or let `claude-tg` prompt you on first run.
-
-## Multi-agent setup
-
-The core use case: run **multiple agents** from separate directories, each with its own Telegram bot, personality, and toolset.
-
-### Directory structure
-
-```
-my-agents/
-├── smm-bot/
-│   ├── CLAUDE.md       ← "You are an SMM manager..."
-│   └── .claude/skills/ ← create-post, write-comment, find-accounts
-├── dev-bot/
-│   ├── CLAUDE.md       ← "You are a frontend developer..."
-│   └── .claude/skills/ ← fix-bug, update-page
-└── dev-senior/
-    ├── CLAUDE.md       ← "You are a senior engineer..."
-    └── .claude/skills/ ← refactor, deploy, review-pr
-```
-
-### Launch each agent
+Run this before every push:
 
 ```bash
-# Terminal 1 — SMM agent
-cd smm-bot && claude-tg    # select "smm"
-
-# Terminal 2 — Dev agent
-cd dev-bot && claude-tg    # select "devops"
-
-# Terminal 3 — Senior dev agent
-cd dev-senior && claude-tg # select "senior"
+git status --short
+git diff --cached --stat
+npm run build
+python3 -m py_compile cleanup-agent-orphans.py
+zsh -n claude-tg
+bash -n status-watcher.sh
 ```
 
-Each session reads its own `CLAUDE.md` and `.claude/skills/` — fully isolated contexts, zero token leakage between agents. The bot token is resolved from the shared registry by name.
-
-### Manual setup (without `claude-tg`)
-
-**SSE mode (recommended):**
-
-1. Start the SSE server (see step 3 above)
-2. Add to your agent's `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "ceo-agent-tools-channels": {
-      "type": "sse",
-      "url": "http://127.0.0.1:3200/sse?bot=devops"
-    }
-  }
-}
-```
-
-3. Launch Claude Code:
-
-```bash
-claude --dangerously-load-development-channels server:ceo-agent-tools-channels
-```
-
-**Stdio mode (single-bot, legacy):**
-
-```json
-{
-  "mcpServers": {
-    "ceo-agent-tools-channels": {
-      "command": "node",
-      "args": ["/absolute/path/to/CEO-agent-tools-channels/dist/index.js"],
-      "env": {
-        "TELEGRAM_BOT_NAME": "devops"
-      }
-    }
-  }
-}
-```
-
-## Environment variables
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `TRANSPORT` | no | `stdio` | Transport mode: `sse` or `stdio`. Auto-set to `sse` if `PORT` is set. |
-| `PORT` | no | `3200` | Port for SSE server (only in SSE mode) |
-| `TELEGRAM_BOT_NAME` | no | — | Bot name filter (stdio mode only). In SSE mode, use `?bot=NAME` query param instead. |
-| `TELEGRAM_POLL_INTERVAL` | no | `1000` | Polling interval in ms |
-| `DEBUG` | no | `0` | Set to `1` to enable debug logging to stderr |
-| `MCP_LOG_FILE` | no | — | Path to a file for persistent debug logging |
-| `TELEGRAM_GROUP_POLICY` | no | `mention-only` | How to handle group chat messages: `open` \| `allowlist` \| `mention-only` |
-
-### Bot routing
-
-**SSE mode:** Each Claude Code session connects to `http://host:port/sse?bot=NAME`. The server routes messages from that bot only to that session. Without `?bot=`, the session receives messages from all bots.
-
-**Stdio mode:** Set `TELEGRAM_BOT_NAME` env var — only that bot is loaded and polled.
-
-### Token deduplication
-
-If multiple bot names share the same token (e.g., `post`/`smm` are aliases for the same Telegram bot), the server polls once per unique token and delivers messages to all alias sessions. This prevents Telegram 409 Conflict errors.
-
-### SSE Health endpoint
-
-```bash
-curl http://127.0.0.1:3200/health
-# {"status":"ok","sessions":11,"bots":["devops","smm",...],"typing":2}
-```
-
-### Typing indicator
-
-In SSE mode, when a Telegram message is forwarded to an agent, the server automatically sends `typing` action to the chat. The indicator repeats every 4 seconds and stops when the agent replies via `send_telegram_message` (or after 2-minute timeout).
-
-## Tools
-
-### `send_telegram_message`
-
-Send a message to a Telegram chat.
-
-| Parameter | Type | Description |
-|---|---|---|
-| `chat_id` | number | Chat ID (from channel event metadata) |
-| `text` | string | Message text (Markdown) |
-
-### Interrupt and passthrough commands (user-initiated, not tools)
-
-These are human-operator commands intercepted by the MCP server before reaching the agent. All require `claude-tg` to run inside a tmux session named after the bot.
-
-| Command | Trigger patterns | What happens |
-|---------|-----------------|--------------|
-| `/stop` | `stop`, `/stop`, `стоп`, `esc`, `escape` | Sends `Escape` to the CLI — cancels the current turn |
-| `/status` | `status`, `/status`, `статус` | Sends `Escape`, waits 150ms, then types `/status Enter` — prints current session status. Live output streams back to Telegram while command runs. |
-| `/compact` | `compact`, `/compact`, `компакт` | Sends `Escape`, waits 150ms, then types `/compact Enter` — compacts the conversation context. Live output streams back to Telegram while command runs. |
-| **`/<anything>`** (v3.2.0) | any message starting with `/` | Generic passthrough — typed into the CLI verbatim with `Escape` → `/<cmd> [args]` → `Enter`. Live output streams back to Telegram. Use this to trigger any built-in Claude Code slash-command (`/help`, `/model`, `/clear`, `/review`, `/ship`…) or any installed skill/plugin command from Telegram. |
-
-**How it works:** for `/stop`, the server sends `tmux send-keys -t <botName> Escape`. For `/status`, `/compact`, and generic passthrough, it sends `Escape` first (to bring the CLI prompt back if mid-inference), waits 150ms, then types the command. All paths finalize the active status message and stop the "typing…" indicator immediately.
-
-**Passthrough guards:** the message must start with `/`, contain **no C0 control characters or DEL** (blocks `\n`, `\r`, `\t`, `\x1b` (ESC), `\b`, etc. — any of these could escape slash-command mode or drive ANSI parsing in the CLI TUI), be ≤ 500 chars, and the first token must match `^[a-z0-9][a-z0-9_:-]{0,63}$` (letters/digits/`_`/`-`/`:` — colon allows plugin-scoped commands like `/oh-my-claudecode:cancel`). Anything else falls through to normal agent routing.
-
-**Group-chat access:** in group chats, only paired/allowlisted users can trigger the generic passthrough. The legacy static triggers (`/stop`, `/status`, `/compact`) remain callable by any group member who can reach the bot, preserving v3.1.x behavior. In private chats, all three + passthrough are gated by the usual `access.isAllowed` check earlier in the polling loop.
-
-**Examples:**
-- `/help` → types `/help` in the CLI, streams the help pane back to Telegram.
-- `/model claude-sonnet-4-6` → switches model; arg case preserved.
-- `/oh-my-claudecode:cancel` → invokes the OMC cancel skill.
-- `/ship` → runs the ship skill end-to-end with live log streaming to Telegram.
-
-**Constraints:**
-- `claude-tg` must be running inside a tmux session named after the bot (e.g. session `devops` for bot `devops`).
-- If the session doesn't exist, the bot replies: "No tmux session '<botName>' — claude-tg not running".
-- launchd plist must include `/opt/homebrew/bin` on PATH (see Setup, step 5).
-
-**For agents:** do NOT use these programmatically. These are human interrupts — only the operator should send them from Telegram.
-
-### `telegram_access`
-
-Manage access control.
-
-| Parameter | Type | Description |
-|---|---|---|
-| `action` | string | `pair`, `unpair`, `list`, or `set-policy` |
-| `code` | string | Pairing code (for `pair`) |
-| `user_id` | number | User ID (for `unpair`) |
-| `policy` | string | `open` or `allowlist` (for `set-policy`) |
-
-## Group chat support
-
-Agents can be added to Telegram group chats and will respond based on the `TELEGRAM_GROUP_POLICY` setting.
-
-### Policies
-
-| Policy | Behavior |
-|--------|----------|
-| `mention-only` | Only respond when bot is `@mentioned` or the message is a reply to a bot message. **Default.** Ideal for finance, ops, or any shared team chat where the bot should stay quiet unless addressed. |
-| `allowlist` | Only respond to messages from users in the access list. Useful for bots where the group is shared but only admins should trigger it. |
-| `open` | Respond to all messages in the group, same as DM behavior. Use only for dedicated bot channels with no casual conversation. |
-
-### What agents receive
-
-When a message arrives from a group, Claude Code receives the full context via channel metadata:
-
-```
-chat_type       = "supergroup"
-chat_title      = "Finance Team"
-is_group        = "true"
-bot_mentioned   = "true"      ← bot was @mentioned
-is_reply_to_bot = "false"
-```
-
-This lets agents make their own filtering decisions in `CLAUDE.md` on top of the MCP-level policy.
-
-### Bot mention detection
-
-Mention is detected via:
-- `@botusername` appearing in text (case-insensitive)
-- Telegram `mention` entity pointing to the bot
-- `text_mention` entity (for bots without usernames)
-- Message is a reply to a previous bot message
-
-The `@mention` is automatically stripped from the message text before forwarding to Claude — so the agent sees a clean command without the `@botname` prefix.
-
-### Access control in groups
-
-By default (`mention-only`), no pairing is required — anyone who mentions the bot will get a response. If you need per-user access control in groups, switch to `allowlist` policy and pair users as usual.
-
-## Media support
-
-The server handles incoming photos and documents — not just text.
-
-**Photos:**
-- Downloaded from Telegram and saved to `/tmp/tg-photo-{file_unique_id}.jpg`
-- Channel event text becomes: `[photo saved to /tmp/tg-photo-<id>.jpg Caption: "..."]`
-- Agent reads the file via Claude Code's native `Read` tool (supports images natively)
-
-**Documents (any file type):**
-- Downloaded to `/tmp/tg-doc-{file_unique_id}-{filename}`
-- Channel event text becomes: `[document: filename.ext (mime/type) saved to /tmp/tg-doc-<id>-filename Caption: "..."]`
-- Text files (`.txt`, `.md`, `.csv`, `.json`, `.yaml`, `.log`) — agent reads with `cat`
-- Images (`.jpg`, `.png`) sent as documents — agent reads with `Read` tool
-
-**Empty messages (photo without caption):**
-- Previously ignored by Claude Code (empty `content` in channel event)
-- Now: fallback text `[message received - no text content]` ensures the message always reaches the agent
-
-**Example channel content for a photo with caption:**
-```
-[photo saved to /tmp/tg-photo-AgACAgI.jpg Caption: "Here's the screenshot"]
-```
-
-**Example channel content for a `.md` file:**
-```
-[document: report.md (text/markdown) saved to /tmp/tg-doc-XYZ123-report.md Caption: "Review this"]
-```
-
-Your agent parses the path from the message text and reads the file directly.
-
-## Access control
-
-By default, the server runs in `allowlist` mode — only paired users can send messages.
-
-**Pairing flow:**
-
-1. Unknown user sends a message to the bot — bot replies with a 6-char code
-2. You tell Claude Code to pair that code — user is added to the allowlist
-3. Bot confirms in Telegram: "Bot authorized under name {botName}"
-4. User can now send messages that reach Claude Code
-
-Pairing codes are single-use and per-user (sending multiple messages won't generate duplicate codes).
-
-**Open mode:**
-
-If you want anyone to message the bot:
-```
-Tell Claude: "set telegram access policy to open"
-```
-
-## Permission relay
-
-When Claude Code needs approval to run a tool (e.g., `Bash`), it forwards the request to Telegram:
-
-```
-🔒 Permission request
-
-Tool: Bash
-Action: Run npm test
-
-Reply "yes abcde" or "no abcde"
-```
-
-Approve or deny tool execution right from your phone — no need to sit at the terminal.
-
-## Debug mode
-
-Debug mode enables verbose logging across all modules. Useful for troubleshooting bot connectivity, pairing issues, and channel communication.
-
-### Enabling
-
-**SSE mode:** Set `DEBUG=1` in the launchd plist's `EnvironmentVariables` or when starting the server:
-```bash
-DEBUG=1 PORT=3200 TRANSPORT=sse node dist/index.js
-```
-
-**Stdio mode:** Set `DEBUG=1` in `.mcp.json` env block.
-
-### Where logs go
-
-- **SSE mode:** `/tmp/ceo-agent-tools-channels.log` (configurable via `MCP_LOG_FILE`)
-- **Stdio mode:** stderr (captured by Claude Code)
-
-### Log prefixes
-
-| Prefix | Module | What it logs |
-|---|---|---|
-| `[telegram-mcp]` | `index.ts` | Startup, bot connection, polling, pairing codes, authorized messages |
-| `[config:debug]` | `config.ts` | Env vars, bot registry lookup, token resolution |
-| `[telegram-api:debug]` | `telegram.ts` | Every Telegram API call and errors |
-| `[access:debug]` | `access.ts` | Access file load/save, pair code lookup, allowlist changes |
-| `[tools:debug]` | `tools.ts` | Tool invocations with arguments, pair results |
-| `[channel:debug]` | `channel.ts` | Channel notifications emitted to Claude Code (full JSON payload) |
-
-### Example debug output
-
-```
-[telegram-mcp] Starting MCP server...
-[config:debug] TELEGRAM_BOT_NAME="devops"
-[config:debug] Token found in registry for "devops"
-[telegram-mcp] Config loaded: bot="devops", accessList="~/.claude/telegram-access-devops.json", poll=1000ms
-[telegram-mcp] Bot connected: @cc_devopsbot (CC devops bot)
-[telegram-mcp] MCP server started on stdio
-[telegram-mcp] Polling started
-[telegram-mcp] Pairing code "abc123" generated for user 123456789 (chat 123456789)
-[access:debug] pair("abc123"): success, allowedUsers=[123456789]
-[telegram-mcp] Sending authorization confirmation to chat 123456789 for bot "devops"
-[channel:debug] Emitting channel notification: {"method":"notifications/claude/channel",...}
-```
-
-### Disabling
-
-Set `DEBUG=0` or remove the `DEBUG` env var. Non-debug logs (`[telegram-mcp]`) always print regardless.
-
-## Process cleanup
-
-**SSE mode:** The server runs persistently via launchd. Individual sessions are cleaned up when the client disconnects. The server itself only stops on `SIGINT`/`SIGTERM`.
-
-**Stdio mode:** The MCP server exits when Claude Code closes stdin or on `SIGINT`/`SIGTERM`/`SIGHUP`.
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| `/stop` returns "No tmux session" | Run `tmux ls` and verify a session named after your bot exists. If you launch via a script outside tmux, wrap it: `tmux new-session -s <botName> "cd ~/agents/<botName> && claude-tg"`. |
-| `/stop` fails with ENOENT on launchd | launchd PATH does not include Homebrew. Add `/opt/homebrew/bin` to `EnvironmentVariables` in your plist (see Setup, step 5). |
-| Status message freezes on long subagent runs (≥1 min) | Upgrade to v3.1.9 — `COUNTER_RE` substitution and watcher hash dedupe removed; timer text now flows live. |
-| Status updates go to an old message after `/stop` and a new task | Upgrade to v3.1.0 — `StatusManager.findTaskByChatId` now returns the most-recent active task instead of the oldest. |
-| Status updates from bot A appear in bot B's chat (cross-bot leak) | Upgrade to v3.1.1 — `findTaskByChatId` now filters by `botName` in addition to `chatId`. |
-| Agent can't connect | SSE server not running. Run `curl http://127.0.0.1:3200/health`. If down, `launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse`. |
-| Messages not arriving | Wrong bot name in `.mcp.json` or polling error. Check stderr logs for `[botname] Polling error`. |
-| "typing..." indicator stuck | Will auto-stop after 2 min. Or restart SSE server. With v3.1.0, `/stop` also calls `stopTyping` immediately. |
-| I edited `src/*.ts` and rebuilt, but TG commands still run old code | **You forgot to restart the SSE server.** Run `launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse`. See ARCHITECTURE.md § "How to start / stop / restart" for the full restart topology. |
-| Plist change (new env var, PATH fix) didn't take effect | `kickstart` keeps the cached plist. Use `launchctl bootout … && launchctl bootstrap …` instead (see ARCHITECTURE.md). |
-| Changed `~/agents/<bot>/CLAUDE.md` but agent still uses old role | Agent CLI caches the config at launch. Attach to the tmux (`tmux attach -t <bot>`), `/exit` the CLI, relaunch `claude-tg`. |
-
-## Skills
-
-The `skills/` directory contains reusable agent skill files.
-
-### spawn-agent
-
-**File:** `skills/spawn-agent/SKILL.md`
-
-A complete step-by-step skill for creating a new agent from scratch. Covers everything:
-
-1. Register bot token in `~/.claude/telegram-bots.json`
-2. Create `telegram-access-{name}.json` with direct allowlist (no pairing needed)
-3. Set up agent directory: `logs/`, `state/`, `.claude/skills/`
-4. Write `.claude/settings.json` with `bypassPermissions` and all tool permissions
-5. Generate a task-specific `CLAUDE.md`
-6. Create the MCP config at `/tmp/claude-tg-mcp.{name}.json`
-7. Start the tmux session
-8. Update the architecture doc in Obsidian
-9. Send a completion report to Telegram
-
-**Usage:** copy the skill file into your agent's `.claude/skills/` folder, or reference it when asking Claude Code to create a new agent:
-
-```
-Create a new agent called "hiring" — it should review incoming CVs, score them against our criteria, and reply with a structured verdict.
-```
-
-Claude will follow the skill and build everything automatically.
-
----
-
-## Architecture
-
-```
-src/
-├── index.ts          # Entry point: SSE/stdio server + Telegram polling + typing indicator + session routing
-├── config.ts         # Bot registry (~/.claude/telegram-bots.json) + env vars → typed config
-├── telegram.ts       # Telegram Bot API client (zero deps, pure fetch) + sendChatAction
-├── access.ts         # Allowlist, pairing codes, policy management (per-bot files)
-├── channel.ts        # Emits MCP channel notifications to Claude Code
-├── permissions.ts    # Permission relay (Claude Code ↔ Telegram)
-└── tools.ts          # MCP tool definitions and handlers
-```
-
-### SSE mode internals
-
-```
-HTTP Server (port 3200)
-├── GET  /sse?bot=NAME    → SSE connection, creates MCP Server per session
-├── POST /messages?sessionId=xxx  → MCP messages from clients
-└── GET  /health          → JSON status (sessions, bots, typing count)
-
-Shared state:
-├── Telegram polling (one loop per unique token)
-├── Session map (sessionId → { server, transport, botName })
-├── Typing intervals (botName:chatId → setInterval)
-└── Token alias map (token → [botName1, botName2, ...])
-```
-
-## Acknowledgements
-
-Based on the official [Anthropic Telegram Channel Plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram) (`telegram@claude-plugins-official`). Rewritten from scratch in TypeScript/Node.js with multi-agent support as the primary design goal.
-
-## Requirements
-
-- Node.js >= 18
-- Claude Code with channels support (v2.1.80+)
-- Claude.ai login (not API key)
-
-## License
-
-Source Available — free to use, fork, and modify. Commercial use (selling the software or services based on it) is not permitted without a separate license. See [LICENSE](./LICENSE) for details.
-
-Copyright Roman Belopolskiy / [4sell.ai](https://4sell.ai) — for commercial licensing: r.belopolskiy@4sell.ai
+Then scan staged content for:
+
+- real Telegram bot tokens;
+- provider API keys;
+- bearer tokens or session cookies;
+- real user IDs, chat IDs, phone numbers, emails;
+- private hostnames, internal IPs, private URLs;
+- customer/company/person names from private operations;
+- absolute paths that reveal private machine/user layout;
+- raw chat exports, transcripts, logs, or screenshots.
+
+If a value is needed for documentation, replace it with `<PLACEHOLDER>`.
+
+## Repository hygiene
+
+- Commit source files and generic docs only.
+- Do not commit local registry files, `.env`, auth folders, generated caches, runtime logs, or temporary media.
+- Keep `dist/` generated by `npm run build`; the source of truth is `src/`.
+- Keep operational instructions generic enough for a clean deployment without exposing a real deployment.

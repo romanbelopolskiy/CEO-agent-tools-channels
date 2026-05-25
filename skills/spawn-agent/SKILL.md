@@ -1,293 +1,153 @@
 # Skill: spawn-agent
 
-Создание нового AI-агента с Telegram-ботом с нуля — полная инфраструктура за один запрос.
+Create a new Claude Code agent connected to this shared Telegram/MCP/SSE bridge.
 
-## Когда использовать
+This skill is intentionally generic. Never write real bot tokens, user IDs, chat IDs, private hostnames, internal URLs, or absolute private paths into committed files.
 
-Когда Roman говорит что-то вроде:
-- "Создай агента для X"
-- "Хочу бота который делает Y"
-- "Нужен агент для Z"
+## Inputs required
 
-## Что нужно от Roman
+Ask for these if they are missing:
 
-Перед началом уточни (если не сказано):
+1. `<AGENT_NAME>` — short lowercase slug.
+2. Purpose — what the agent should do.
+3. Main responsibilities — brief bullet list.
+4. Bot credential — provided out-of-band and stored only in local private config.
+5. Authorized operator identity — stored only in local private access config.
 
-1. **Имя агента** — короткое, латиницей (пример: `sales`, `hiring`, `content`)
-2. **Цель** — зачем агент нужен, что делает (1-2 предложения)
-3. **Задачи** — какие команды/задачи будет выполнять (список или описание)
-4. **Telegram-токен** — токен от @BotFather для нового бота
+Do not ask the user to paste secrets into a public issue, PR, or committed document.
 
-Если какого-то пункта нет — спроси. Не начинай создание без всех четырёх.
+## Creation workflow
 
----
+### 1. Register bot locally
 
-## Алгоритм создания
+Add the bot to the local private bridge registry. Example shape only:
 
-### Шаг 1 — Получить Telegram-токен
-
-Если токен не предоставлен, напомни Roman:
-```
-Создай бота через @BotFather:
-1. Открой @BotFather в Telegram
-2. /newbot
-3. Задай имя и username
-4. Пришли токен сюда
+```json
+{
+  "<BOT_NAME>": { "token": "<TELEGRAM_BOT_TOKEN>" }
+}
 ```
 
-### Шаг 2 — Зарегистрировать бота
+The registry path is deployment-specific and must stay outside git.
 
-Добавить токен в реестр:
-```bash
-python3 -c "
-import json
-path = '/Users/romanbelopolskiy/.claude/telegram-bots.json'
-d = json.load(open(path))
-d['{BOT_NAME}'] = {'token': '{TOKEN}'}
-json.dump(d, open(path, 'w'), indent=2)
-"
-```
+### 2. Create local access policy
 
-Создать access-файл:
-```bash
-cat > /Users/romanbelopolskiy/.claude/telegram-access-{BOT_NAME}.json << 'EOF'
+Create a local private access file for the bot. Example shape only:
+
+```json
 {
   "policy": "allowlist",
-  "allowedUsers": [YOUR_TELEGRAM_USER_ID],
+  "allowedUsers": ["<AUTHORIZED_USER_ID>"],
   "pendingPairs": {}
 }
-EOF
 ```
 
-### Шаг 3 — Создать папку агента
+Do not commit this file.
 
-```bash
-mkdir -p /Users/romanbelopolskiy/agents/{NAME}/logs
-mkdir -p /Users/romanbelopolskiy/agents/{NAME}/.claude/skills
-mkdir -p /Users/romanbelopolskiy/agents/{NAME}/state
+### 3. Create agent workspace
+
+Use deployment-specific workspace paths. In docs and templates, refer to them as:
+
+```text
+<AGENT_DIR>/
+  CLAUDE.md
+  .mcp.json
+  .claude-tg.json
+  .claude/settings.json
+  logs/
+  state/
 ```
 
-### Шаг 4 — Создать .claude/settings.json
+### 4. Create `.mcp.json`
 
-```bash
-cat > /Users/romanbelopolskiy/agents/{NAME}/.claude/settings.json << 'EOF'
-{
-  "permissions": {
-    "allow": [
-      "Bash(*)",
-      "Edit(*)",
-      "Read(*)",
-      "Write(*)",
-      "Glob(*)",
-      "Grep(*)",
-      "WebFetch(*)",
-      "WebSearch(*)",
-      "Agent(*)",
-      "NotebookEdit(*)",
-      "Skill(*)",
-      "ToolSearch(*)",
-      "TaskCreate(*)",
-      "TaskUpdate(*)",
-      "TaskGet(*)",
-      "TaskList(*)",
-      "TaskStop(*)",
-      "TaskOutput(*)",
-      "CronCreate(*)",
-      "CronDelete(*)",
-      "CronList(*)",
-      "EnterPlanMode(*)",
-      "ExitPlanMode(*)",
-      "EnterWorktree(*)",
-      "ExitWorktree(*)",
-      "AskUserQuestion(*)",
-      "mcp__ceo-agent-tools-channels__*"
-    ],
-    "deny": []
-  },
-  "defaultMode": "bypassPermissions",
-  "skipDangerousModePermissionPrompt": true,
-  "skipAutoPermissionPrompt": true,
-  "enableAllProjectMcpServers": true
-}
-EOF
-```
-
-### Шаг 5 — Создать CLAUDE.md
-
-Генерируй CLAUDE.md на основе цели и задач агента. Шаблон:
-
-```markdown
-# {NAME} Agent
-
-You are Roman Belopolskiy's {DESCRIPTION} agent. {ONE_LINE_PURPOSE}.
-
-## Permissions
-
-You have full root access. Never ask for confirmation — execute everything immediately. You can:
-- Run any shell command without approval
-- Edit any file on the system including your own CLAUDE.md, skills, and configs
-- Read/write any path
-- Self-modify your skills and learned patterns based on feedback
-
-## How you work
-
-You communicate with the user exclusively through Telegram. When you receive a message, it's a task to {MAIN_TASK}.
-
-## Context files
-
-Before starting any task, read:
-- [список контекстных файлов специфичных для агента]
-
-## Workflow
-
-[описание режимов работы и команд агента — специфично под задачи]
-
-## Communication
-
-- Reply to the user via the `send_telegram_message` tool using the `chat_id` from the incoming message metadata
-- Always confirm task completion with a brief summary
-
-## Context loading rule (token efficiency)
-
-When re-reading skill/context files at the start of a run:
-- If the file was already read in this session and has not changed — skip re-reading it
-- Check modification time: `stat -f "%m" <file>` vs your last read timestamp stored in session memory
-- Only re-read if the file was modified since last read
-- For large skill files (>200 lines): read only the relevant section using offset/limit, not the full file
-
-## Logging
-
-Log every request and response to a daily file in your agent folder:
-- Path: `~/agents/{NAME}/logs/YYYY-MM-DD.md` (replace YYYY-MM-DD with actual date)
-- Create the `logs/` directory if it does not exist
-- At the start of each new day, start a new file (do not append to previous day)
-
-Format for each entry:
-\`\`\`
-## [HH:MM:SS]
-
-**IN:** [full incoming message text]
-
-**OUT:** [summary of what you did / replied]
-
-**FILES:** [list of files read/analyzed during this task, or "none"]
-
----
-\`\`\`
-
-Log immediately after processing each message — before or after sending the Telegram reply.
-Do not log internal tool calls or intermediate steps, only the user-facing request and your final response summary.
-```
-
-### Шаг 6 — Создать MCP-конфиг
-
-Создать `.mcp.json` в папке агента (подключение к shared SSE серверу):
-
-```bash
-cat > /Users/romanbelopolskiy/agents/{NAME}/.mcp.json << 'EOF'
+```json
 {
   "mcpServers": {
     "ceo-agent-tools-channels": {
       "type": "sse",
-      "url": "http://127.0.0.1:3200/sse?bot={BOT_NAME}"
+      "url": "<SSE_BASE_URL>/sse?bot=<BOT_NAME>"
     }
   }
 }
-EOF
 ```
 
-> SSE сервер (`com.ceo-agent-tools.channels-sse`) должен быть запущен на порту 3200.
-> Проверить: `curl http://127.0.0.1:3200/health`
+### 5. Create `.claude-tg.json`
 
-### Шаг 7 — Перезапустить SSE сервер (чтобы подхватить нового бота)
-
-```bash
-launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse
-sleep 0.5 && curl -sf http://127.0.0.1:3200/health && echo " ✅"
+```json
+{
+  "model": "<MODEL_ALIAS>",
+  "effort": "<EFFORT_LEVEL>",
+  "telegramTelemetry": "status"
+}
 ```
 
-`kickstart -k` терминирует текущий процесс и даёт launchd его респавнить (работает с `KeepAlive=true`). Это канонический способ рестарта после правок `src/*.ts` или изменений в `~/.claude/telegram-bots.json`. Устаревшие `unload/load` работают, но проходят только после правки самого plist-файла; для изменений в коде используй `kickstart`.
+### 6. Create `CLAUDE.md`
 
-Если менял сам **plist** (`~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist`) — `kickstart` его НЕ перечитает. Тогда:
+Template:
 
-```bash
-launchctl bootout  gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
-```
-
-Полный сценарий рестартов и дерево решений — см. `~/CEO-agent-tools-channels/ARCHITECTURE.md` § "How to start / stop / restart".
-
-### Шаг 8 — Запустить в tmux
-
-```bash
-tmux new-session -d -s {NAME} -x 220 -y 50
-tmux send-keys -t {NAME}:0 "cd /Users/romanbelopolskiy/agents/{NAME} && ~/CEO-agent-tools-channels/claude-tg" Enter
-```
-
-`claude-tg` автоматически определит бота по имени директории.
-
-### Шаг 9 — Обновить архитектурный документ
-
-Открыть и добавить секцию нового агента:
-`/Users/romanbelopolskiy/.openclaw/workspace/Obsidian-Networking-KB/95 Agents/agent-factory-architecture.md`
-
-Добавить в секцию агентов:
 ```markdown
-### 🤖 {NAME} Agent
+# <AGENT_NAME> Agent
 
-**tmux:** `{NAME}` | **Бот:** `{BOT_NAME}` | **Папка:** `~/agents/{NAME}/`
+You are the `<AGENT_NAME>` agent. Your purpose is: <PURPOSE>.
 
-#### Назначение
-{DESCRIPTION}
+## Communication
 
-#### Workflow
-{краткое описание что делает}
+- You receive user messages through the shared bridge.
+- You reply only through the bridge MCP tools.
+- Do not connect to Telegram directly.
+- Do not read, store, or print bot tokens.
+- Keep user-facing messages concise and useful.
 
-#### Skills
-`~/agents/{NAME}/.claude/skills/`
+## Responsibilities
+
+<RESPONSIBILITIES>
+
+## Boundaries
+
+- Use only approved tools for this workspace.
+- Do not expose secrets, credentials, private IDs, raw chats, or internal paths.
+- If a task requires a new paid service or external infrastructure, ask for approval first.
+
+## Logging
+
+If local logging is enabled, log only concise summaries. Do not log raw private messages, credentials, tokens, or full transcripts.
 ```
 
-Обновить таблицу Cron-задач если нужно.
-Обновить дату: `Последнее обновление: YYYY-MM-DD`.
+### 7. Launch agent
 
-### Шаг 10 — Отчёт Roman
-
-Отправить итог:
-```
-✅ Агент {NAME} создан
-
-📁 Папка: ~/agents/{NAME}/
-🤖 Telegram-бот: @{USERNAME}
-🖥 tmux-сессия: {NAME}
-📋 CLAUDE.md: настроен под задачу
-⚙️ Права: bypassPermissions, полный доступ
-📝 Логи: ~/agents/{NAME}/logs/YYYY-MM-DD.md
-📄 Архитектура: обновлена
-
-Написать боту в Telegram — он готов к работе.
+```bash
+tmux new-session -d -s <BOT_NAME> 'claude-tg --bot <BOT_NAME>'
 ```
 
----
+The tmux session name should match `<BOT_NAME>`.
 
-## Checklist (проверь перед тем как отчитаться)
+### 8. Restart bridge if registry changed
 
-- [ ] Токен добавлен в `telegram-bots.json`
-- [ ] `telegram-access-{NAME}.json` создан (allowlist: YOUR_TELEGRAM_USER_ID)
-- [ ] `~/agents/{NAME}/` создана со всеми папками (logs, state, .claude/skills)
-- [ ] `.claude/settings.json` — bypassPermissions, все разрешения
-- [ ] `CLAUDE.md` — написан под конкретную задачу агента
-- [ ] `.mcp.json` с SSE URL (`?bot={NAME}`) создан в папке агента
-- [ ] SSE сервер перезапущен (подхватил нового бота)
-- [ ] tmux-сессия запущена через `claude-tg`
-- [ ] Архитектурный документ обновлён
+After changing the local bot registry, restart the bridge process in the deployment-specific way, then verify:
 
----
+```bash
+curl -sf <SSE_BASE_URL>/health
+```
 
-## Заметки
+### 9. Verify
 
-- **Один бот = одна tmux-сессия** — не запускать несколько агентов в одной сессии
-- **BOT_NAME в telegram-bots.json** должен совпадать с `?bot=` параметром в `.mcp.json`
-- **SSE сервер** — один shared инстанс на порту 3200, launchd `com.ceo-agent-tools.channels-sse`
-- **Typing indicator** — автоматически отправляется пока агент обрабатывает сообщение
-- **Логи** — каждый агент пишет в свою папку, новый день = новый файл
-- **CLAUDE.md** — пиши конкретно под задачу, не копируй шаблон буквально
+- Bot registry contains `<BOT_NAME>` locally.
+- Access policy allows the intended operator only.
+- Agent `.mcp.json` points to `<SSE_BASE_URL>/sse?bot=<BOT_NAME>`.
+- tmux session exists with name `<BOT_NAME>`.
+- Bridge health endpoint is OK.
+- Agent receives a test message and replies through the bridge.
+- No secrets or private deployment values were committed.
+
+## Security checklist
+
+Before committing any agent template or documentation, confirm there are no:
+
+- real bot tokens;
+- API keys;
+- user IDs or chat IDs;
+- private hostnames or internal URLs;
+- personal emails or phone numbers;
+- customer/company/person names from private operations;
+- raw logs, raw chats, screenshots, transcripts;
+- absolute private paths.

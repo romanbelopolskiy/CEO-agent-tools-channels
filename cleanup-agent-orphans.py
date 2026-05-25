@@ -3,9 +3,9 @@
 
 Safety model:
 - A tmux-backed current agent has a shell parent (claude-tg) inside its tmux pane.
-- Stale duplicates seen on agents-central are `script -q -c claude ... server:ceo-agent-tools-channels`
+- Stale duplicates can appear when `script -q -c claude ... server:ceo-agent-tools-channels`
   wrappers whose PPID is 1 after the old tmux/shell died, with a child Claude still
-  running in `/srv/agents/claude-agents/<agent>`.
+  running in an agent workspace.
 - This script only kills confirmed orphan wrappers (PPID=1) by default.
 - With --agent-dir --prestart, it also kills any already-running Telegram-bridge Claude
   for that exact agent directory before a new launcher starts, preventing two live
@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 BRIDGE_MARKER = "server:ceo-agent-tools-channels"
-AGENTS_ROOT = Path("/srv/agents/claude-agents").resolve()
+AGENTS_ROOT = Path(os.environ.get("CLAUDE_AGENTS_ROOT", ".")).resolve()
 
 
 def _read_text(path: str) -> str:

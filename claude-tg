@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Launch Claude Code agent with Telegram bot via shared SSE server
 # Usage: claude-tg [--bot NAME] [--model MODEL] [--effort low|medium|high|max] [claude args...]
-# Auto-detects bot name from directory if ~/agents/<botname>/.mcp.json exists
+# Auto-detects bot name from directory if the workspace name matches a configured bot
 # Loads per-agent defaults from .claude-tg.json in the agent directory when present
 
 BOTS_FILE="$HOME/.claude/telegram-bots.json"
@@ -81,7 +81,7 @@ AGENT_DIR="$(pwd)"
 AGENT_DEFAULTS_PATH="$AGENT_DIR/$DEFAULTS_FILE"
 
 # Prevent duplicate Telegram Claude agents for the same bot/agent directory.
-# Historical failure mode on agents-central: tmux/shell died, but the util-linux
+# Historical failure mode: tmux/shell died, but the util-linux
 # `script -q -c claude ... server:ceo-agent-tools-channels` wrapper was adopted by
 # PID 1 and kept answering Telegram alongside the new tmux-backed session.
 LOCK_DIR="${TMPDIR:-/tmp}/claude-tg-locks"

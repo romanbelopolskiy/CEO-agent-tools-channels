@@ -350,7 +350,7 @@ function hasMatchingSseSession(botName: string, botsMap: Map<string, BotContext>
 function startAgentSession(botName: string): boolean {
   // Called only when no matching SSE session exists. If tmux is still present,
   // it is disconnected from the bridge (for example after bridge restart), so
-  // replace it; otherwise /srv/agents/bin/start-agent.sh would no-op.
+  // replace it; otherwise a start hook may no-op on an already-existing tmux.
   try {
     execFileSync("tmux", ["has-session", "-t", botName], { timeout: 3000 });
     execFileSync("tmux", ["kill-session", "-t", botName], { timeout: 5000 });
@@ -358,8 +358,9 @@ function startAgentSession(botName: string): boolean {
   } catch {}
 
   try {
+    const startAgentCommand = process.env.START_AGENT_COMMAND || "start-agent.sh";
     for (let attempt = 1; attempt <= 3; attempt += 1) {
-      execFileSync("/srv/agents/bin/start-agent.sh", [botName], { timeout: 45000, stdio: "pipe" });
+      execFileSync(startAgentCommand, [botName], { timeout: 45000, stdio: "pipe" });
       try {
         execFileSync("tmux", ["has-session", "-t", botName], { timeout: 3000, stdio: "ignore" });
         log(`[${botName}] wake-on-message started tmux session`);

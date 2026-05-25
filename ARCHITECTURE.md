@@ -1,572 +1,196 @@
-# CEO Agent Tools — Architecture & Operations Guide
+# Architecture and Operations Guide
 
-Documentation for Claude Code agents who will administer, restart, debug, and extend this MCP server. Read this before touching any code.
+This guide describes the bridge architecture without exposing any private deployment values. Use placeholders in committed examples. Real tokens, user IDs, chat IDs, hostnames, internal URLs, and absolute private paths belong only in local runtime config.
 
-## What this system does
+## Components
 
-A shared MCP server that connects multiple Claude Code agents to Telegram. Each agent has its own Telegram bot identity. The server runs as a single long-lived process (SSE mode) that all agent sessions connect to via HTTP. It also supports a legacy stdio mode for single-agent setups.
-
-```
-┌──────────────────┐     HTTP SSE      ┌────────────────────────────────┐
-│ Claude Code      │ ◄───────────────► │  ceo-agent-tools-channels      │
-│ (agent session)  │  /sse?bot=NAME    │  (shared MCP server)           │
-│                  │  /messages         │                                │
-│  uses tools:     │                   │  Polls Telegram API per bot    │
-│  send_telegram_  │                   │  Routes msgs to sessions       │
-│  message         │                   │  Manages live status messages  │
-└──────────────────┘                   └─────────┬──────────────────────┘
-                                                 │
-                                                 ▼ Telegram Bot API
-                                          ┌─────────────┐
-                                          │  Telegram    │
-                                          │  (per bot)   │
-                                          └─────────────┘
+```text
+Telegram Bot API
+  <-> shared Node bridge process
+      - polls configured bots
+      - enforces access rules
+      - exposes MCP/SSE endpoints
+      - forwards messages into matching Claude sessions
+      - sends replies/status back to Telegram
+  <-> Claude Code agent sessions
+      - one session per bot identity
+      - launched by claude-tg
+      - connected by MCP/SSE
 ```
 
 ## File layout
 
-```
-CEO-agent-tools-channels/
-├── src/
-│   ├── index.ts            # Entrypoint: boot, SSE server, polling loop, message routing
-│   ├── telegram.ts         # Telegram Bot API client (sendMessage, editMessageText, getUpdates, etc.)
-│   ├── tools.ts            # MCP tool registration (send_telegram_message, telegram_access, list_telegram_bots)
-│   ├── status-messages.ts  # Live status message system (StatusManager, renderer, throttle)
-│   ├── config.ts           # Config loader: reads ~/.claude/telegram-bots.json
-│   ├── channel.ts          # MCP channel notification emitters
-│   ├── access.ts           # Per-bot access control & pairing
-│   ├── permissions.ts      # Permission request forwarding to Telegram
-│   ├── logger.ts           # Shared log() and debug() — single source
-│   └── constants.ts        # All magic numbers (intervals, timeouts, ports)
-├── dist/                   # Compiled JS (tsc output). This is what runs.
-├── claude-tg               # Shell launcher: picks bot, model, effort, starts Claude Code
-├── status-watcher.sh       # Background watcher: tails script(1) log, POSTs to /status-feed
-├── render-tui.py           # Renders TTY capture to plain text (pyte), strips chrome
-├── package.json            # v3.1.10, deps: @modelcontextprotocol/sdk
-├── tsconfig.json           # ES2022 + Node16 module resolution
-├── CHANGELOG.md            # Version history
-└── ARCHITECTURE.md         # This file
+```text
+src/index.ts             Bridge entrypoint: HTTP server, polling, routing, wake-on-message, media enrichment
+src/telegram.ts          Telegram API client wrapper
+src/tools.ts             MCP tools exposed to agents
+src/status-messages.ts   Live Telegram status lifecycle
+src/config.ts            Local bot registry loader
+src/access.ts            Pairing and allowlist logic
+src/permissions.ts       Permission forwarding
+src/channel.ts           MCP channel emitters
+src/logger.ts            Shared logging
+src/constants.ts         Runtime constants
+claude-tg                Agent launcher
+cleanup-agent-orphans.py Duplicate/orphan process cleanup
+status-watcher.sh        Live TUI renderer poster
+render-tui.py            TUI-to-text renderer
 ```
 
-## Configuration files
+## Configuration model
 
-### `~/.claude/telegram-bots.json` (required)
+### Bot registry
 
-Registry of all bot tokens. One entry per bot.
+Local private file, not committed:
 
 ```json
 {
-  "fullstack": { "token": "7938...:AAH..." },
-  "devops":    { "token": "7938...:AAH..." },
-  "frontend":  { "token": "8012...:BBG..." }
+  "<BOT_NAME>": { "token": "<TELEGRAM_BOT_TOKEN>" }
 }
 ```
 
-Bots with the same token share a single Telegram polling loop (deduped). Each bot name is a separate identity for routing.
+The bridge loads bot identities from this registry. Multiple names may share the same token when intentional; polling is deduplicated by token.
 
-### `~/agents/<agent>/.claude-tg.json` (optional, per-agent)
+### Agent MCP config
 
-Per-agent defaults for the `claude-tg` launcher and live status telemetry.
-
-```json
-{
-  "model": "opus",
-  "effort": "max",
-  "telegramTelemetry": "status"
-}
-```
-
-- `telegramTelemetry`: `"silent"` | `"status"` (default) | `"verbose"`
-  - `silent` — no status message created
-  - `status` — shows key events: task started, thinking, command, tool call, error, finished
-  - `verbose` — shows everything including tool_finished, command exit codes, thinking updates
-
-### `~/agents/<agent>/.mcp.json` (auto-generated by claude-tg)
-
-MCP connection config for the agent's Claude Code session.
+Each agent has an MCP config like:
 
 ```json
 {
   "mcpServers": {
     "ceo-agent-tools-channels": {
       "type": "sse",
-      "url": "http://127.0.0.1:3200/sse?bot=fullstack"
+      "url": "<SSE_BASE_URL>/sse?bot=<BOT_NAME>"
     }
   }
 }
 ```
 
-### Environment variables
+Agents only see bridge tools. They do not receive bot tokens and must not implement direct Telegram clients.
 
-| Variable | Default | Description |
-|---|---|---|
-| `TRANSPORT` | auto (sse if PORT set) | `sse` or `stdio` |
-| `PORT` | `3200` | SSE server port |
-| `TELEGRAM_BOT_NAME` | (all bots) | Load only this bot from registry |
-| `TELEGRAM_POLL_INTERVAL` | `1000` | Polling interval in ms (min 100) |
-| `TELEGRAM_GROUP_POLICY` | `mention-only` | Group behavior: `open` / `allowlist` / `mention-only` |
-| `DEBUG` | `false` | Enable verbose debug logging |
-| `MCP_LOG_FILE` | (none) | If set, also write logs to this file |
-| `AGENT_DIR` | `process.cwd()` | Directory to read `.claude-tg.json` from |
+### Per-agent launcher defaults
 
-## Runtime dependencies
+Optional local file in the agent workspace:
 
-`render-tui.py` imports `pyte` and is called by every `status-watcher.sh` process. On Ubuntu agents-central install it from apt:
+```json
+{
+  "model": "<MODEL_ALIAS>",
+  "effort": "<EFFORT_LEVEL>",
+  "telegramTelemetry": "status"
+}
+```
+
+## Message routing
+
+1. Bridge receives Telegram update from a configured bot polling loop.
+2. Access policy is checked for the sender/chat.
+3. Media is downloaded by the bridge if present.
+4. Voice/audio is transcribed by the bridge if a speech-to-text provider is configured.
+5. Bridge resolves aliases for the bot name.
+6. If a matching SSE session exists, the message is emitted into that session.
+7. If no matching session exists, wake-on-message starts or replaces the matching tmux session, waits for SSE reconnect, then emits the message.
+8. If wake fails, the bridge sends a short failure message and logs diagnostics.
+
+## Reply routing
+
+Agents reply through MCP tools exposed by the bridge. The bridge performs actual Telegram API calls. This preserves the isolation boundary:
+
+- token handling stays in the bridge;
+- agents do not store or read bot tokens;
+- Telegram parse-mode fallback is centralized;
+- live status messages are finalized when a user-facing reply is sent.
+
+## Wake-on-message lifecycle
+
+Wake-on-message exists so idle/stopped agent sessions can still receive the first Telegram message reliably.
+
+Algorithm:
+
+1. Check if any SSE session matches `<BOT_NAME>` or its aliases.
+2. If absent, check for a stale tmux session with the same name.
+3. Replace disconnected tmux if needed.
+4. Call the local start-agent hook with `<BOT_NAME>`.
+5. Verify that tmux session exists.
+6. Poll for SSE reconnect until timeout.
+7. Deliver the original Telegram message only after reconnect.
+8. Fail loudly in logs if the session cannot be started.
+
+## Duplicate-session protection
+
+`claude-tg` uses a per-bot lock. A second launcher for the same bot refuses to create another live Claude session.
+
+Before launch, `cleanup-agent-orphans.py` removes stale bridge-backed Claude processes only when they match safe criteria:
+
+- orphaned wrapper adopted by PID 1; or
+- same exact agent directory during prestart cleanup.
+
+Do not broaden cleanup patterns without deterministic checks. Avoid killing by loose bot-name substring alone.
+
+## Media and transcription boundary
+
+The bridge may download Telegram media and may call an externally configured speech-to-text provider. The resulting agent message contains either:
+
+```text
+[voice transcript; audio saved to <LOCAL_TEMP_FILE>]
+<transcript text>
+```
+
+or:
+
+```text
+[voice saved to <LOCAL_TEMP_FILE>; transcript unavailable]
+```
+
+Agents should treat the transcript as user input. Agents should not call Telegram media APIs directly.
+
+## Live status boundary
+
+`status-watcher.sh` follows a local Claude TUI log, renders it through `render-tui.py`, and posts compact text to the bridge status endpoint.
+
+Operational rules:
+
+- Use system Python by default for renderer dependencies.
+- Restart the affected agent session after changing watcher or renderer scripts.
+- Do not expose raw logs to Telegram; status output should stay compact and user-safe.
+
+## Restart matrix
+
+| Change | Build | Restart bridge | Restart agent session |
+|---|---:|---:|---:|
+| `src/**/*.ts` | yes | yes | no |
+| local bot registry | no | yes | only new/changed agents |
+| `claude-tg` | no | no | yes |
+| `cleanup-agent-orphans.py` | no | no | yes before next launch |
+| `status-watcher.sh` / `render-tui.py` | no | no | yes |
+| one agent instruction/config | no | no | that agent only |
+
+## Validation commands
 
 ```bash
-sudo apt-get install -y python3-pyte
+npm run build
+python3 -m py_compile cleanup-agent-orphans.py
+zsh -n claude-tg
+bash -n status-watcher.sh
+./cleanup-agent-orphans.py --json
 ```
 
-Missing `python3-pyte` is a live-status outage: watcher ticks fail before POSTing rendered Claude output to `/status-feed`.
-
-## How to start / stop / restart
-
-### Restart topology
-
-Two independent layers; restart what you changed. The one Roman trips on most: **editing `src/**/*.ts` and forgetting that the SSE server caches the old `dist/` until it is restarted.**
-
-1. **SSE server (launchd job `com.ceo-agent-tools.channels-sse`)** — single process, handles TG polling for all bots, runs `tryHandleCommand` (slash-passthrough, `/stop`, `/status`, `/compact`), brokers MCP tools to all agent CLIs. Edit any `src/*.ts`, run `npm run build`, then bounce this job.
-2. **Per-agent CLI (`claude-tg` inside a tmux session named after the bot)** — one tmux per agent, each runs its own Claude Code process, its own `status-watcher.sh` child, and holds its own session state. Edit agent config (`~/agents/<bot>/CLAUDE.md`, `.mcp.json`, `.claude-tg.json`) or `render-tui.py` / `status-watcher.sh`, then bounce the agent's tmux.
-
-No launchd job wraps the agent tmux sessions — they are started by hand (`cd ~/agents/<bot> && claude-tg`). If the Mac reboots, the SSE server comes back automatically (`KeepAlive=true`) but agent sessions need to be relaunched manually.
-
-### Decision table — what changed → what to restart
-
-| I edited… | Rebuild dist? | Restart SSE? | Restart agent tmux? |
-|---|---|---|---|
-| `src/**/*.ts` in this repo | **Yes** (`npm run build`) | **Yes** | No |
-| `render-tui.py` | No | No | **Yes** (watcher is a child of `claude-tg`) |
-| `status-watcher.sh` | No | No | **Yes** |
-| `claude-tg` launcher script | No | No | **Yes** |
-| `~/agents/<bot>/CLAUDE.md` | No | No | **Yes** |
-| `~/agents/<bot>/.mcp.json` or `.claude-tg.json` | No | No | **Yes** |
-| `~/.claude/telegram-bots.json` (add/remove bot token) | No | **Yes** | New bot: launch its tmux |
-| `~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist` | No | **Yes** via `bootout` + `bootstrap` (plist changes do NOT propagate through `kickstart`) | No |
-
-### Restart the SSE server after code changes (the 99% case)
+After deployment, verify privately in the target environment:
 
 ```bash
-cd ~/CEO-agent-tools-channels
-npm run build                                                    # src/ → dist/
-launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse
-sleep 0.5 && curl -sf http://127.0.0.1:3200/health && echo " ✅"
+curl -sf <SSE_BASE_URL>/health
 ```
 
-- `kickstart -k` terminates the running process and re-launches it under the same launchd job. `-k` is required when `KeepAlive=true` (the default here), otherwise launchd would respawn the old process before `kickstart` gets to it.
-- The TG polling loop inside SSE is the layer that evaluates `tryHandleCommand`. Until you kickstart, every `/foo` from TG runs the pre-build logic.
-- Agent tmux sessions keep their MCP connection alive — the `@modelcontextprotocol/sdk` client auto-reconnects to SSE when it returns. Normal turns resume in ~1–2s with no human action.
-
-### Restart the SSE server after plist changes
-
-When you edit `~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist` itself (new env var, changed PATH, etc.), `kickstart` is **not enough** — launchd keeps the cached plist in memory. Use bootout/bootstrap:
-
-```bash
-launchctl bootout  gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
-curl -sf http://127.0.0.1:3200/health && echo " ✅"
-```
-
-### Restart one agent tmux
-
-Preferred: attach, exit the CLI cleanly, relaunch. Keeps the tmux session for history.
-
-```bash
-tmux attach -t devops
-# inside: press Ctrl-C if a turn is running, then type /exit (or Ctrl-D)
-# then: claude-tg --effort max
-# detach: Ctrl-B d
-```
-
-Cold restart (nukes the tmux too):
-
-```bash
-tmux kill-session -t devops 2>/dev/null
-( cd ~/agents/devops && tmux new-session -d -s devops 'claude-tg --effort max' )
-```
-
-### Restart all agent tmux sessions at once
-
-No built-in launcher yet; this is the usual loop. Skip any tmux sessions that aren't agent CLIs (e.g. `ceo-tools` if you happen to run one manually).
-
-```bash
-for s in $(tmux ls -F '#S' 2>/dev/null); do
-  case "$s" in
-    ceo-tools|qa-*) continue;;  # skip non-agent sessions
-  esac
-  tmux kill-session -t "$s"
-done
-for bot in devops fullstack frontend changelog smm trends network \
-           company-pulse meet finance jira-admin erp-admin engage; do
-  [[ -d ~/agents/$bot ]] && \
-    ( cd ~/agents/$bot && tmux new-session -d -s "$bot" 'claude-tg --effort max' )
-done
-```
-
-### Full reload (SSE + every agent) — the nuclear option
-
-Do this when you're not sure what's stale, or after a `git pull` that touched both `src/` and `~/agents/<name>/CLAUDE.md`.
-
-```bash
-cd ~/CEO-agent-tools-channels && npm run build && \
-  launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse && \
-  sleep 0.5 && curl -sf http://127.0.0.1:3200/health && echo " SSE ✅"
-
-for s in $(tmux ls -F '#S' 2>/dev/null); do
-  case "$s" in ceo-tools|qa-*) continue;; esac
-  tmux kill-session -t "$s"
-done
-for bot in devops fullstack frontend changelog smm trends network \
-           company-pulse meet finance jira-admin erp-admin engage; do
-  [[ -d ~/agents/$bot ]] && \
-    ( cd ~/agents/$bot && tmux new-session -d -s "$bot" 'claude-tg --effort max' )
-done
-```
-
-### Stop everything (downtime)
-
-```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
-for s in $(tmux ls -F '#S' 2>/dev/null); do tmux kill-session -t "$s"; done
-```
-
-### Start again
-
-```bash
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
-curl -sf http://127.0.0.1:3200/health && echo " SSE ✅"
-# then relaunch each agent tmux (see loop above)
-```
-
-### Bare-metal dev run (no launchd)
-
-Useful when debugging SSE itself — you want logs on stdout and to control Ctrl-C.
-
-```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.ceo-agent-tools.channels-sse.plist
-cd ~/CEO-agent-tools-channels
-PORT=3200 TRANSPORT=sse DEBUG=true node dist/index.js
-# Ctrl-C to stop. Don't forget to re-bootstrap the launchd job when done.
-```
-
-### Health checks
-
-```bash
-# Is the launchd job running?
-launchctl list | grep com.ceo-agent-tools
-# → "9877  0  com.ceo-agent-tools.channels-sse"   (PID  exit-status  label)
-
-# Does SSE respond?
-curl -sf http://127.0.0.1:3200/health
-# → {"status":"ok","sessions":2,"bots":["fullstack","devops"],"typing":0}
-
-# Is dist newer than src? (if not, you forgot `npm run build`)
-ls -lct dist/index.js src/index.ts | head -2
-
-# What version is the running SSE? (match against package.json)
-node -p 'require("./package.json").version'
-# Compare to the timestamp in /tmp/ceo-agent-tools-channels.log at last start.
-
-# Tail server logs
-tail -f /tmp/ceo-agent-tools-channels.log
-
-# List active agent tmux sessions
-tmux ls
-```
-
-### Triage: "I edited code, rebuilt, sent a command in TG — nothing changed"
-
-Run each check until one fails:
-
-1. `ls -lct dist/index.js src/index.ts | head -2` — is `dist/` newer than `src/`? If not: `npm run build`.
-2. `launchctl list | grep com.ceo-agent-tools` — running? If PID is `-`: `launchctl kickstart -k gui/$(id -u)/com.ceo-agent-tools.channels-sse`.
-3. `tail -20 /tmp/ceo-agent-tools-channels.log` — startup errors? Missing env var? Port conflict?
-4. Compare the process start time to your build time: `ps -o lstart -p $(launchctl list | awk '/com.ceo-agent-tools/ {print $1}')` vs `stat -f '%Sm' dist/index.js`. If process is older than dist, **you forgot to kickstart**.
-5. Only if none of the above: the feature genuinely isn't in the source. Run `grep -n <symbol> dist/index.js` to confirm it shipped into the compiled bundle.
-
-### Launch a new agent session from scratch
-
-```bash
-cd ~/agents/fullstack
-~/CEO-agent-tools-channels/claude-tg --effort max
-```
-
-`claude-tg` auto-detects the bot from the directory name, reads `.claude-tg.json` for defaults, checks SSE server health, writes `.mcp.json` if missing, then spawns Claude Code under `script(1)` so `status-watcher.sh` can tail the TTY capture. The launcher runs `pkill -f "status-watcher\.sh.*<botName>"` on startup to kill any orphaned watcher from a crashed previous session.
-
-## Module-by-module guide
-
-### `src/index.ts` — main orchestrator (609 lines)
-
-**Boot sequence:** `main()` → `loadConfig()` → `initBots()` → `StatusManager` init → `startSseServer()` or `startStdioServer()`.
-
-**Key functions:**
-- `initBots(config)` — creates `TelegramClient` per unique token, `BotContext` per bot name, dedupes polling.
-- `startPolling(server, botsMap, runtime, ...)` — infinite loop per bot: `getUpdates()` → access check → media enrichment → `routeToSessions()` or `emitChannelMessage()`. Also intercepts messages matching any registered command trigger and calls `tryHandleCommand` before routing.
-- `routeToSessions(botsMap, botName, msg, ...)` — finds matching SSE sessions by bot name or wildcard, emits channel notification, starts typing, starts live status task.
-- `startTyping()` / `stopTyping()` — `sendChatAction("typing")` every 4s until agent replies or 2min timeout.
-- `tryHandleCommand(botName, chatId, text)` — async command dispatcher. First matches text against the `COMMANDS` registry (`stop`/`status`/`compact`). If nothing matches but the message starts with `/`, synthesizes a streaming passthrough command on the fly (v3.2.0) — any other slash-command is typed into the CLI verbatim with `Escape` → `/<name> [args]` → `Enter`. Sends the `tmux send-keys` batch(es) with a 150ms inter-batch delay, finalizes the active task (`statusManager.finishTask`) and stops the typing indicator (`stopTyping`). Returns `null` if the message is neither a registry trigger nor a valid passthrough.
-- `enrichMedia()` — downloads photos/documents to `/tmp/`, prepends metadata to message text.
-
-**Where things break:** if the SSE server process dies, ALL agents lose their channel. Check `tmux ls` and `curl :3200/health`. If polling errors accumulate, the bot may lag — check stderr / MCP_LOG_FILE.
-
-### `src/telegram.ts` — Telegram Bot API client (174 lines)
-
-Stateless HTTP client using native `fetch`. No external deps.
-
-**Methods:**
-- `sendMessage(chatId, text, parseMode)` — main outbound
-- `editMessageText(chatId, messageId, text, parseMode)` — for live status updates
-- `sendChatAction(chatId, "typing")` — typing indicator
-- `getUpdates(offset, timeout, limit)` — long-polling
-- `getMe()` — bot identity
-- `getFile(fileId)` + `downloadFile(filePath)` — media download
-- `deleteWebhook(dropPendingUpdates)` — cleanup on start
-
-**Error pattern:** all methods throw on non-200 or `ok:false`. Callers must catch. The polling loop catches and logs; tool handlers catch and return MCP error responses.
-
-### `src/tools.ts` — MCP tool definitions (299 lines)
-
-Three tools exposed to Claude Code agents:
-
-1. **`send_telegram_message(bot_name, chat_id, text)`** — the main reply tool. Also: stops typing indicator, finalizes live status message.
-2. **`telegram_access(bot_name, action, ...)`** — pair/unpair/list/set-policy for access control.
-3. **`list_telegram_bots()`** — enumerate registered bots.
-
-**Extension point:** to add a new tool, add its spec to the `TOOLS` array (name, description, inputSchema), then add a `case` in the `switch(name)` block. The tool handler receives `args` and has access to `botsMap` and `statusManager` via closure.
-
-### `src/status-messages.ts` — live status system (384 lines)
-
-**Classes:**
-- `StatusManager` — manages one live Telegram message per task.
-  - `startTask(opts)` → sends initial "⏳ Задача принята" message, stores `statusMessageId`.
-  - `emitEvent(event)` → debounced `editMessageText` with rendered status.
-  - `finishTask(taskId)` / `failTask(taskId, error)` → immediate final edit.
-  - `findTaskByChatId(chatId, botName)` → returns the **most-recent** active task for that chat scoped to the given bot (highest `startedAt`). Scoping by `botName` prevents cross-bot status leaks when the same user has tasks running in multiple bots simultaneously.
-  - `findMostRecentActiveTask()` → fallback for tool calls that don't carry `chat_id`.
-  - `gc()` → cleanup finished tasks older than 10 min.
-
-**State machine (v3.1.4):** per `(botName, chatId)` pair, state is `"streaming"` while a task is active (no `finishedAt`) and `"replied"` once `finishTask` is called (by `send_telegram_message`, `/stop`, or `failTask`). The `/status-feed` handler only updates the status message in `"streaming"` state; it skips silently in `"replied"` or absent state.
-
-**`renderStatus(event, state)`** — pure function: event type → emoji + text card. Each event type has its own template.
-
-**Throttling:** events are debounced at 3s (`STATUS_DEBOUNCE_MS`). If 10 events fire within 3s, only the last one gets sent. Text dedupe: same text as last rendered → skip. Terminal events (`task_finished`, `task_failed`) force an immediate flush. The 3s debounce matches the `status-watcher.sh` tick interval — both must move in lockstep to keep `editMessageText` calls well under the Telegram Bot API rate limit (~1 edit/sec/chat).
-
-**Verbosity:** `shouldShow(event, mode)` gates which events reach the renderer. `status` mode shows ~7 event types; `verbose` adds 4 more; `silent` shows nothing.
-
-### `src/config.ts` — configuration (86 lines)
-
-Reads `~/.claude/telegram-bots.json`. Supports `TELEGRAM_BOT_NAME` env to restrict to one bot. Validates `TELEGRAM_POLL_INTERVAL` (min 100ms). Reads `TELEGRAM_GROUP_POLICY`.
-
-### `src/access.ts` — access control (134 lines)
-
-Per-bot allowlist stored in `~/.claude/telegram-access-<botname>.json`. Supports pairing codes (6-char, 5-min expiry). Policies: `open` (anyone can message) or `allowlist` (must pair first).
-
-### `src/permissions.ts` — permission forwarding (96 lines)
-
-When Claude Code requests tool permissions, forwards the request to authorized Telegram users as an inline message with approve/deny buttons.
-
-### `src/channel.ts` — MCP channel notifications (77 lines)
-
-Emits `claude/channel` and `claude/channel/permission` notifications to the MCP server, which Claude Code picks up as inbound channel messages.
-
-### `src/logger.ts` — logging (22 lines)
-
-`log(msg)` → stderr + optional file. `debug(msg)` → stderr only if `DEBUG=1`. Used by all modules.
-
-### `src/constants.ts` — magic numbers
-
-`TYPING_INTERVAL_MS`, `TYPING_TIMEOUT_MS`, `POLL_TIMEOUT_SEC`, `DEFAULT_SSE_PORT`, `STATUS_DEBOUNCE_MS`, `STATUS_GC_INTERVAL_MS`, `STATUS_GC_MAX_AGE_MS`.
-
-## Message flow (end to end)
-
-```
-1. User sends "deploy to prod" in Telegram
-                    │
-2. getUpdates() picks it up in polling loop
-                    │
-3. Access check (allowlist / pairing)
-                    │
-4. enrichMedia() downloads any photo/doc to /tmp/
-                    │
-5. routeToSessions() finds matching SSE session
-   ├─ emitChannelMessage() → MCP notification to Claude Code
-   ├─ startTyping() → "typing..." indicator every 4s
-   └─ statusManager.startTask() → sends "⏳ Задача принята" Telegram msg
-                    │
-6. Claude Code agent receives the message, starts processing
-                    │
-7. Agent calls MCP tools (read files, run bash, etc.)
-   └─ tools.ts emits tool_started → statusManager edits: "🔧 Вызываю tool"
-                    │
-8. Agent calls send_telegram_message(bot, chat, "Deployed!")
-   ├─ telegram.sendMessage() → agent's reply appears in chat
-   ├─ stopTyping()
-   └─ statusManager.finishTask() → marks task finalized (finishedAt set)
-
-9. If agent continues working (subagents, more tools) after the reply:
-   └─ status-watcher.sh POSTs to /status-feed → no active task found →
-      /status-feed skips (state is "replied"). Status message stays frozen
-      at the moment of the agent reply. No phantom status messages.
-      Next user message creates a fresh task → streaming resumes.
-```
-
-## How to extend
-
-### Add a new MCP tool
-
-1. Add spec to `TOOLS` array in `src/tools.ts`:
-   ```ts
-   {
-     name: "my_new_tool",
-     description: "...",
-     inputSchema: { type: "object", properties: { ... }, required: [...] },
-   }
-   ```
-2. Add handler in the `switch(name)` block.
-3. `npm run build`.
-4. Restart server.
-
-### Add a new status event type
-
-1. Add the type to `AgentRuntimeEvent["type"]` union in `src/status-messages.ts`.
-2. Add a `case` in `renderStatus()`.
-3. Add to `STATUS_EVENTS` or `VERBOSE_ONLY_EVENTS` set depending on when it should show.
-4. Emit it from the relevant call site (index.ts polling loop or tools.ts handler).
-
-### Add a new Telegram API method
-
-1. Add the method to `TelegramClient` class in `src/telegram.ts`, following the existing pattern (`this.request<T>("methodName", { params })`).
-2. Use it from wherever needed.
-
-### Change the status message format
-
-Edit `renderStatus()` in `src/status-messages.ts`. It's a pure function — takes an event + task state, returns a string. No side effects, easy to test manually.
-
-### Add a new bot
-
-1. Add to `~/.claude/telegram-bots.json`:
-   ```json
-   { "newbot": { "token": "123:ABC..." } }
-   ```
-2. Restart the MCP server.
-3. In the agent directory: `~/CEO-agent-tools-channels/claude-tg --bot newbot`.
-
-## Command handling
-
-When the operator sends a command keyword in Telegram, the message is intercepted before it reaches Claude Code. Handled by `tryHandleCommand` in `src/index.ts`.
-
-### Command registry (`COMMANDS` array)
-
-Each entry has a `streamOutput: boolean` flag that controls whether a synthetic streaming task is created before keystrokes are sent.
-
-| Command | Trigger patterns | tmux keys sent | `streamOutput` |
-|---------|-----------------|----------------|----------------|
-| `stop` | `stop`, `/stop`, `стоп`, `esc`, `escape` | `Escape` | `false` |
-| `status` | `status`, `/status`, `статус` | `Escape`, then (150ms delay), `/status Enter` | `true` |
-| `compact` | `compact`, `/compact`, `компакт` | `Escape`, then (150ms delay), `/compact Enter` | `true` |
-
-### Generic slash passthrough (v3.2.0)
-
-Any Telegram message that starts with `/` and doesn't match a registry trigger is treated as a **generic passthrough**: an on-the-fly `CommandDef` is synthesized with `tmuxKeys: [["Escape"], [raw, "Enter"]]` and `streamOutput: true`, then executed through the same pipeline as `/status` / `/compact`. This makes every Claude Code slash-command — built-in (`/help`, `/model`, `/clear`, `/review`…), project, personal, or plugin-scoped (`oh-my-claudecode:cancel`) — reachable from Telegram without adding registry entries.
-
-Passthrough guards in `tryHandleCommand`:
-- Caller opts-in with `{ allowPassthrough: true }` (default). The group-chat call site passes `access.isAllowed(userId, chatId)` as this flag, so un-paired group members never trigger passthrough (they can still send `/stop` / `/status` / `/compact` — those go through the static registry path).
-- Raw text must start with `/`.
-- `CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/` rejects all C0 control chars + DEL. Covers `\n`/`\r` (would `Enter` mid-command in tmux), plus `\x1b` (would escape slash-command mode into the TUI), `\t` (autocomplete), `\b` (buffer edit), and other terminal-meaningful bytes.
-- Length ≤ 500 chars (sanity cap).
-- First token after `/` must match `^[a-z0-9][a-z0-9_:-]{0,63}$` — a-z/0-9 start, then lowercase letters/digits/`_`/`-`/`:` (colon enables plugin scoping).
-- The full raw message (preserving arg case, e.g. `/model Opus`) is typed into the CLI as a **single argv element** to `tmux send-keys`. Only the command name is lowercased for registry lookup and reply rendering.
-- Reply: `` 🔀 Sent `/<name>` to CLI `` (name wrapped in backticks so legacy-Markdown parser in Telegram treats it as inline code — protects skill names with `_`). Output streams back via the existing `status-watcher.sh` → `/status-feed` pipeline.
-
-**Load-bearing tmux invariant:** the keystroke batch is `[["Escape"], [raw, "Enter"]]`. `raw` is passed as one argv element. tmux `send-keys` interprets named keys like `Enter`, `C-c`, `Escape`, `Up` specially **only when they appear as separate argv elements**. A refactor that splits `raw` on whitespace before handing it to `send-keys` would immediately turn user-chosen words into injected keystrokes. The invariant is documented inline in `src/index.ts`; keep it.
-
-**Access model:** passthrough is gated on `access.isAllowed` in group chats; private chats are already gated earlier in the polling loop. Legacy static commands (`/stop` / `/status` / `/compact`) are not gated — same as v3.1.x.
-
-### Mechanism (`tryHandleCommand` in `src/index.ts`):
-
-1. Match trimmed, lowercased message text against all trigger arrays in `COMMANDS`.
-2. If no match **and** the raw text passes passthrough guards → synthesize a streaming `CommandDef` on the fly (v3.2.0).
-3. If still no match → return `null` (message proceeds to normal routing).
-3. `execFileSync("tmux", ["has-session", "-t", botName])` — verify the session exists.
-4. If not found → reply "No tmux session 'botName' — claude-tg not running" and return.
-5. **Finalize existing task:** `statusManager.findTaskByChatId(chatId, botName)` + `finishTask(task.taskId)` — clean slate before proceeding.
-6. **Synthetic task for streaming commands:** if `cmd.streamOutput === true` and `statusManager` is available and `telemetryMode !== "silent"`, call `statusManager.startTask({ taskId: "botName:chatId:cmd-<name>-<ts>", botName, chatId, sourceMessageId: 0, mode: telemetryMode })`. This sends the initial "⏳" status message to Telegram before the CLI starts producing output, so the `status-watcher.sh` → `/status-feed` pipeline can stream visible CLI output back to Telegram in real-time. `/stop` skips this step (`streamOutput: false`).
-7. For each batch in `cmd.tmuxKeys`: if not the first batch, wait 150ms (lets the CLI repaint after Escape), then call `execFileSync("tmux", ["send-keys", "-t", botName, ...keys])`.
-8. `stopTyping(botName, chatId)` — clears the Telegram "typing…" indicator immediately.
-
-**Synthetic task lifecycle:** the task created for `/status` or `/compact` is never explicitly finished by `tryHandleCommand`. It stays active until:
-- Roman sends his next message → `routeToSessions` calls `startTask` for the new user message; `findTaskByChatId` returns the most-recent active task (the new one), so old one is orphaned-active.
-- After `STATUS_GC_MAX_AGE_MS` (10 min) the GC reaps unfinished tasks.
-This is intentional — the watcher keeps streaming as long as the CLI is producing output, and the task quietly expires once stale.
-
-**Why Escape first for `/status` and `/compact`:** if the CLI is mid-inference, subsequent keystrokes are buffered into whatever TUI widget is active and will not register as a command. Sending Escape brings the CLI back to the input prompt; the 150ms pause ensures the terminal repaints before the command is typed.
-
-**Constraints:**
-- `claude-tg` must run inside a tmux session named exactly after the bot (e.g. `tmux new-session -s devops`).
-- On macOS with launchd, the plist's `EnvironmentVariables.PATH` must include `/opt/homebrew/bin`. launchd's default PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) does not include Homebrew, so `execFileSync("tmux", ...)` fails with `ENOENT` without this fix.
-
-## render-tui.py — live status CLI renderer
-
-`render-tui.py` renders a `script(1)` TTY capture file to plain text. Used by `status-watcher.sh` to extract the visible claude CLI output for POSTing to `/status-feed`.
-
-**Tail window (v3.1.8):** Only the last 256 KB of the log file is read per tick (`TAIL_WINDOW = 256 * 1024`). This makes rendering O(1) in log size — critical because `script(1)` logs grow unboundedly during long tasks. Without this, pyte replay time grows with the log, causing `curl --max-time 3` timeouts in the watcher and freezing live output after ~60s.
-
-**HistoryScreen (v3.1.10):** Uses `pyte.HistoryScreen(width, 100, history=2000, ratio=0.5)` instead of `pyte.Screen`. `Screen` only keeps the visible 100-row buffer — rows that scroll off the top are permanently lost. `HistoryScreen` preserves up to 2000 scrolled-off rows in `screen.history.top` (a deque of `StaticDefaultDict` rows with integer→Char entries). After feeding the data, history rows are reconstructed via `row.get(x, pyte.screens.Char(" ")).data` and prepended to display lines, giving a full transcript of the current user-message turn. The `render()` function clamps `max_lines = max(max_lines, 80)` so existing watcher sessions that pass the old `25` argument automatically receive 80 rows without tmux restart.
-
-**Chrome filtering (`is_chrome`):**
-
-Strips decorative UI chrome. Current filter list (v3.1.5):
-
-- Empty lines
-- Horizontal rules (`─`)
-- `❯` prompt prefix
-- `"bypass permissions"` substring (permission footer)
-- Logo art lines — non-whitespace chars are a subset of `▐▛█▜▌▝▘ ` (box-drawing only)
-- `"Claude Code v"` prefix (version header)
-- `"Welcome to "` prefix (startup welcome)
-- `"Listening for channel messages"` substring (channel warning)
-- `"Experimental · inbound"` substring (dangerously-load-development-channels warning)
-- `"Restart Claude Code without"` substring (continuation of channel warning)
-- `"(ctrl+"` line prefix (keyboard hint footer)
-- `"⎿  Tip:"` or `"Tip:"` stripped-prefix (tip hints)
-- Model/effort banner matching `MODEL_BANNER_RE`: `^(Opus|Sonnet|Haiku)\s+\d+\.\d+\s+(with|·)` (e.g. "Opus 4.7 with max effort · Claude Max")
-
-Changed from a trailing-only `pop()` loop to a full-pass list comprehension `[l for l in lines if not is_chrome(l)]`, catching chrome lines anywhere in the buffer (v3.1.0).
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| Agent can't connect | SSE server not running | `curl :3200/health`. If down, restart. |
-| Messages not arriving | Bot polling error or wrong bot name | Check stderr logs for `[botname] Polling error`. Verify `.mcp.json` has correct `?bot=NAME`. |
-| "typing..." indicator stuck | `stopTyping` not called (agent crashed?) | Will auto-stop after 2 min. Or restart server. With v3.1.0, `/stop` also calls `stopTyping` immediately. |
-| Status message not appearing | `telegramTelemetry: "silent"` in `.claude-tg.json` | Change to `"status"` and restart agent session. |
-| Status message not updating | Debounce swallowing fast events | Normal — events within 3s are coalesced. Terminal events always flush. |
-| Live output freezes after ~60s of active tool calls | `render-tui.py` was reading the entire log file on every tick; once the log grew large (4+ MB), pyte replay took multiple seconds, causing `curl --max-time 3` in the watcher to time out. | Fixed in v3.1.8 — `render-tui.py` now reads only the last 256 KB of the log file per tick. |
-| `npm run build` fails | TypeScript error | Read the error. Usually a missing import or type mismatch. |
-| 400 from Telegram editMessageText | Text unchanged (Telegram rejects no-op edits) | Normal — dedupe in StatusManager prevents this, but if it happens, it's harmless. |
-| High memory usage | Finished tasks not GC'd | Check `gc()` is running. It auto-runs every 60s. |
-| `/stop` returns "No tmux session" | claude-tg not in a tmux session | Run `tmux ls`. Launch via `tmux new-session -s <botName> "cd ~/agents/<botName> && claude-tg"`. |
-| `/stop` ENOENT on launchd | Homebrew not on launchd PATH | Add `/opt/homebrew/bin` to `EnvironmentVariables.PATH` in the launchd plist (see Setup in README). |
-| Status freezes on long runs (≥1 min) | Old render-tui.py with COUNTER_RE + watcher hash dedupe | Update to v3.1.9 — COUNTER_RE and PREV_HASH dedupe removed. |
-| Only current frame visible in Telegram (earlier tool calls / assistant messages missing) | `pyte.Screen` drops rows that scroll off the top of the 100-row visible buffer | Update to v3.1.10 — `pyte.HistoryScreen(history=2000)` preserves scrolled-off rows. |
-| Status goes to old message after /stop | Old `findTaskByChatId` returning first task | Update to v3.1.0 `status-messages.ts`. |
-| Startup banner leaks into status (logo, model, tips) | Claude CLI emits `ESC[2J ESC[H` + full banner redraw mid-task (on every tool-call cycle start). pyte replays the full screen, leaving the banner as the top of the visible buffer until new content overwrites it. | Update to v3.1.5 `render-tui.py` — `is_chrome()` now filters all banner patterns. |
-
-## Version history
-
-See `CHANGELOG.md` for full details.
-
-- **v3.1.10** (2026-04-17) — Preserve scrollback in live TUI stream: replaced `pyte.Screen` with `pyte.HistoryScreen(history=2000)` so scrolled-off rows are included in every Telegram update. `max_lines` default raised 25→80 with in-function clamp so existing sessions self-heal without tmux restart.
-- **v3.1.9** (2026-04-17) — Unfreeze TUI stream on long runs: removed `COUNTER_RE` substitution from `render-tui.py` and `PREV_HASH` hash dedupe from `status-watcher.sh`. SSE-level dedupe (`lastRenderedText`) is sufficient.
-- **v3.1.8** (2026-04-17) — Cadence 1s → 3s (`STATUS_DEBOUNCE_MS` + watcher sleep); fix live output freeze after ~60s (render-tui.py now tails last 256 KB instead of full file read).
-- **v3.2.0** (2026-04-23) — Generic slash passthrough in `tryHandleCommand`: any `/<name> [args]` message not in the registry is typed into the CLI verbatim with streaming output, enabling all Claude Code slash-commands (built-in and skills) via Telegram.
-- **v3.1.7** (2026-04-16) — `streamOutput` flag in `CommandDef`; synthetic streaming task for `/status` and `/compact`; CLI output visible in Telegram via watcher pipeline.
-- **v3.1.6** (2026-04-16) — `/status` and `/compact` commands, generalized command registry (`tryHandleCommand`), `tryHandleStop` removed.
-- **v3.1.5** (2026-04-17) — Strip Claude CLI startup banner from live status: logo, model/effort line, experimental warning, tip hints filtered by `is_chrome()`.
-- **v3.1.4** (2026-04-16) — Simple state machine: status streams between user message and reply, freezes on reply. Removed auto-create and cooldown heuristics.
-- **v3.1.0** (2026-04-16) — Reliable `/stop` via tmux send-keys, stable live status (counter normalization, chrome detection fix), `findTaskByChatId` most-recent semantics, `tryHandleStop` finalizes task + stops typing.
-- **v3.0.0** (2026-04-16) — Live status messages, editMessageText, StatusManager, per-agent config, shared logger + constants.
-- **v2.0.0** (2026-04-09) — SSE transport, per-bot routing, typing indicator, token dedup, claude-tg launcher.
-- **v1.3.0** — Group chat support.
-- **v1.2.0** — Media support (photos, documents).
-- **v1.0.0** — Initial release, stdio mode.
+## Documentation sanitization rules
+
+Committed docs must not contain:
+
+- real bot tokens or API keys;
+- token variable names tied to a private deployment;
+- real Telegram user IDs or chat IDs;
+- emails, phone numbers, private handles;
+- private hostnames, internal IPs, or deployment URLs;
+- private absolute paths;
+- private customer, employee, or company names;
+- raw logs, raw message history, or transcripts.
+
+Use placeholders such as `<BOT_NAME>`, `<SSE_BASE_URL>`, `<AGENT_DIR>`, `<LOCAL_CONFIG_PATH>`, and `<TELEGRAM_BOT_TOKEN>`.

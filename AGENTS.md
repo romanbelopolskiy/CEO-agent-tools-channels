@@ -1,15 +1,36 @@
 # CEO Agent Tools Channels
 
-## Agents-Central InsForge migration rules (Roman-specific)
+## Repository instructions
 
-For any work on agents-central, Hermes/Gateway, Claude agents, MCP/Telegram bridge, cron/schedules, documentation, or the Agents-Central → InsForge migration, first follow the canonical docs in `/srv/agents/mdm/agents-MDM/projects/agents-central-insforge/`:
+This repository is the shared Telegram/MCP/SSE bridge for Claude Code agents.
 
-- `README.md`
-- `ai-agents.md`
-- `architecture/target-state.md`
-- `features/README.md`
-- `skills/insforge-migration-onboarding/SKILL.md`
+Hard boundaries:
 
-Binding constraints: feature spec before behavior changes; ADR + C4/architecture-doc updates for durable architecture decisions; layered architecture; new durable agent-system state targets InsForge Postgres unless an ADR records an exception; strict MCP-only access to InsForge for all agents (Hermes/Gateway and Claude): no direct Postgres/PostgREST/API/SDK/psql outside active InsForge backend refinement, and any refinement must close with a documented MCP method; Claude agents do not connect to Telegram directly; no secrets in docs/logs/commits; cost-impacting infra requires Roman approval; Done includes docs update, validation/check, and secret scan.
+- Claude agents connect to this bridge through MCP/SSE only.
+- Claude agents must not connect to Telegram directly.
+- Bot tokens and access lists live in local private config, never in git.
+- Documentation must use placeholders for private deployment values.
+- Do not commit secrets, API keys, bot tokens, user IDs, chat IDs, private hostnames, internal URLs, customer names, employee names, raw logs, raw chats, or local absolute paths.
+- Cost-impacting or external-service changes require explicit owner approval before implementation.
 
-This repository is the Telegram/SSE/MCP bridge for Claude agents. Preserve the Telegram isolation boundary: bridge-mediated delivery is allowed; individual Claude agents must not add their own direct Telegram clients or token handling.
+Before changing behavior:
+
+1. Read `README.md` and `ARCHITECTURE.md`.
+2. Keep the bridge/agent isolation boundary intact.
+3. Update docs when runtime behavior changes.
+4. Run validation:
+
+```bash
+npm run build
+python3 -m py_compile cleanup-agent-orphans.py
+zsh -n claude-tg
+bash -n status-watcher.sh
+./cleanup-agent-orphans.py --json
+```
+
+Before every commit:
+
+1. Stage only files related to the change.
+2. Scan staged content for secrets and private identifiers.
+3. Replace real values with placeholders like `<BOT_NAME>`, `<SSE_BASE_URL>`, `<AGENT_DIR>`, `<LOCAL_CONFIG_PATH>`, `<TELEGRAM_BOT_TOKEN>`.
+4. Do not include generated caches, local registries, `.env`, runtime logs, auth/session folders, or temporary media.
