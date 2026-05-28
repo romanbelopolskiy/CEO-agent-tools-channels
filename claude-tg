@@ -145,10 +145,10 @@ if [[ -z "$CLI_MODEL" ]]; then
 fi
 
 case "$CLI_MODEL" in
-  sonnet|opus) ;;
+  sonnet|opus|claude-*) ;;
   *)
     echo "Invalid model: $CLI_MODEL"
-    echo "Use one of: sonnet, opus"
+    echo "Use one of: sonnet, opus, or a full Claude model name starting with claude-"
     exit 1
     ;;
 esac
