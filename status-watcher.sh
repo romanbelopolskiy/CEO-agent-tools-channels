@@ -21,6 +21,17 @@ if [ ! -x "$PYTHON_BIN" ]; then
 fi
 WATCHER_LOG="${STATUS_WATCHER_LOG:-/tmp/status-watcher-${BOT_NAME}.log}"
 RENDER_ERROR_SENT=0
+# Change-detection state: signature (size:mtime) of the logfile at the last
+# successful render+POST. While the log is unchanged (agent idle at prompt) we
+# skip BOTH the python render and the curl POST, eliminating the idle-time
+# fork/exec storm that was pinning %system CPU on the 4-vCPU VM. Render+POST
+# resume the instant the log advances, so verbose live status keeps no lag.
+LAST_SIG=""
+# Self-terminate guard: claude-tg rm's the per-PID logfile when the agent exits.
+# Exit cleanly after the log has been missing for several ticks so a
+# watcher-only relaunch (or a normal agent restart) never leaves orphan watchers
+# spinning on a deleted logfile.
+MISSING=0
 
 post_status() {
   local text="$1"
@@ -35,8 +46,23 @@ post_status() {
 while true; do
   sleep 3
 
-  [ -f "$LOGFILE" ] || continue
+  if [ ! -f "$LOGFILE" ]; then
+    MISSING=$((MISSING + 1))
+    if [ "$MISSING" -ge 5 ]; then
+      printf '%s logfile gone for %s ticks, exiting watcher\n' "$(date -Is)" "$MISSING" >> "$WATCHER_LOG"
+      exit 0
+    fi
+    continue
+  fi
+  MISSING=0
   [ -s "$LOGFILE" ] || continue
+
+  # Skip render+POST when the log has not advanced since the last successful
+  # render. size:mtime catches both appends (size) and in-place rewrites (mtime).
+  SIG="$(stat -c '%s:%Y' "$LOGFILE" 2>/dev/null || echo "")"
+  if [ -n "$SIG" ] && [ "$SIG" = "$LAST_SIG" ]; then
+    continue
+  fi
 
   ERRFILE=$(mktemp "/tmp/status-render-${BOT_NAME}.XXXXXX")
   RAW=$("$PYTHON_BIN" "$RENDER" "$LOGFILE" 80 2>"$ERRFILE")
@@ -56,4 +82,7 @@ while true; do
   [ -z "$RAW" ] && continue
 
   post_status "$RAW"
+  # Mark this log signature as rendered only after a successful render+POST, so
+  # a transient render failure or empty frame retries on the next tick.
+  LAST_SIG="$SIG"
 done
