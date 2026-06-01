@@ -2,6 +2,7 @@
 
 import http from "node:http";
 import { execFileSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { URL } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -205,6 +206,7 @@ type CommandDef = {
   tmuxKeys: string[][];
   reply: string;
   streamOutput: boolean;
+  restartSession?: boolean;
 };
 
 const COMMANDS: CommandDef[] = [
@@ -214,6 +216,14 @@ const COMMANDS: CommandDef[] = [
     tmuxKeys: [["Escape"]],
     reply: "🛑 Interrupted",
     streamOutput: false,
+  },
+  {
+    name: "new",
+    triggers: ["new", "/new", "новая сессия", "новый чат"],
+    tmuxKeys: [],
+    reply: "🔄 Новая сессия агента запущена",
+    streamOutput: false,
+    restartSession: true,
   },
   {
     name: "status",
@@ -239,6 +249,7 @@ const PASSTHROUGH_MAX_LEN = 500;
 // ESC / TAB / BS bytes would be typed into the Claude Code TUI, potentially escaping
 // slash-command mode, driving ANSI parsing, or triggering autocompletes.
 const CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
+const SESSION_ARCHIVE_ROOT = process.env.TELEGRAM_SESSION_ARCHIVE_ROOT || "/home/roman/.hermes/reports/ceo-agent-tools-channels/session-archive";
 
 async function tryHandleCommand(
   botName: string,
@@ -276,6 +287,21 @@ async function tryHandleCommand(
       reply: `🔀 Sent \`/${name}\` to CLI`,
       streamOutput: true,
     };
+  }
+
+  if (cmd.restartSession) {
+    try {
+      const existingTask = statusManager?.findTaskByChatId(chatId, botName);
+      if (existingTask) {
+        statusManager?.finishTask(existingTask.taskId);
+        log(`[${botName}] finalized task ${existingTask.taskId} on /${cmd.name}`);
+      }
+    } catch {}
+    stopTyping(botName, chatId);
+    const restarted = await restartAgentSessionForCommand(botName);
+    return restarted.ok
+      ? `${cmd.reply}${restarted.archivePath ? `\nПредыдущая сохранена: ${restarted.archivePath}` : ""}`
+      : `❌ Не смог запустить новую сессию агента ${botName}`;
   }
 
   // Check whether the tmux session exists (non-zero exit = no session)
@@ -327,10 +353,9 @@ async function tryHandleCommand(
 
 // --- Get all bot names that share a token with the given bot ---
 function getBotAliases(botName: string, botsMap: Map<string, BotContext>): string[] {
-  const bot = botsMap.get(botName);
-  if (!bot) return [botName];
-
-  // Find the token for this bot by checking tokenAliases
+  // Find the token for this bot by checking tokenAliases. Do not require the
+  // caller to pass a populated botsMap: command handlers may run with only the
+  // bot slug but still need alias-aware SSE matching.
   for (const [, aliases] of tokenAliases) {
     if (aliases.includes(botName)) {
       return aliases;
@@ -376,6 +401,86 @@ function startAgentSession(botName: string): boolean {
     log(`[${botName}] wake-on-message failed to start session: ${err}`);
     return false;
   }
+}
+
+function archivePreviousAgentSession(botName: string): string | null {
+  const safeBotName = botName.replace(/[^a-zA-Z0-9_.-]/g, "_");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const archiveDir = `${SESSION_ARCHIVE_ROOT}/${safeBotName}`;
+  const archivePath = `${archiveDir}/${stamp}.txt`;
+
+  try {
+    mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
+    const parts: string[] = [];
+    parts.push(`# Claude Telegram agent session archive`);
+    parts.push(`bot: ${botName}`);
+    parts.push(`archived_at: ${new Date().toISOString()}`);
+    parts.push("");
+
+    try {
+      const panes = execFileSync("tmux", ["list-panes", "-t", botName, "-F", "#S #{pane_id} pid=#{pane_pid} command=#{pane_current_command} path=#{pane_current_path}"], { timeout: 3000 }).toString();
+      parts.push("## tmux panes");
+      parts.push(panes.trim() || "(empty)");
+      parts.push("");
+    } catch (err) {
+      parts.push(`## tmux panes\n(unavailable: ${(err as Error).message})\n`);
+    }
+
+    try {
+      const pane = execFileSync("tmux", ["capture-pane", "-pt", botName, "-S", "-100000"], { timeout: 5000, maxBuffer: 20 * 1024 * 1024 }).toString();
+      parts.push("## tmux captured pane");
+      parts.push(pane.trimEnd() || "(empty)");
+      parts.push("");
+    } catch (err) {
+      parts.push(`## tmux captured pane\n(unavailable: ${(err as Error).message})\n`);
+    }
+
+    writeFileSync(archivePath, parts.join("\n"), { mode: 0o600 });
+    log(`[${botName}] previous session archived before /new: ${archivePath}`);
+    return archivePath;
+  } catch (err) {
+    log(`[${botName}] failed to archive previous session before /new: ${err}`);
+    return null;
+  }
+}
+
+async function restartAgentSessionForCommand(botName: string): Promise<{ ok: boolean; archivePath?: string | null }> {
+  // `/new` from Telegram should mean a fresh Claude Code runtime, not Claude Code's
+  // in-TUI `/clear` alias. Kill the tmux-backed session, let prestart orphan cleanup
+  // run through start-agent.sh, then wait until the new MCP/SSE session reconnects.
+  const aliases = getBotAliases(botName, new Map());
+  const previousSessionIds = new Set<string>();
+  let archivePath: string | null = null;
+  for (const [id, session] of sseSessions) {
+    if (session.botName === null || aliases.includes(session.botName)) previousSessionIds.add(id);
+  }
+
+  try {
+    execFileSync("tmux", ["has-session", "-t", botName], { timeout: 3000 });
+    archivePath = archivePreviousAgentSession(botName);
+    execFileSync("tmux", ["kill-session", "-t", botName], { timeout: 5000 });
+    log(`[${botName}] /new killed tmux session for fresh restart`);
+  } catch {
+    log(`[${botName}] /new found no tmux session before fresh restart`);
+  }
+
+  const started = startAgentSession(botName);
+  if (!started) return { ok: false, archivePath };
+
+  const deadline = Date.now() + Number(process.env.TELEGRAM_NEW_WAIT_MS || process.env.TELEGRAM_WAKE_WAIT_MS || "90000");
+  while (Date.now() < deadline) {
+    for (const [id, session] of sseSessions) {
+      if (!previousSessionIds.has(id) && (session.botName === null || aliases.includes(session.botName))) {
+        return { ok: true, archivePath };
+      }
+    }
+    try {
+      const pane = execFileSync("tmux", ["capture-pane", "-pt", botName, "-S", "-80"], { timeout: 3000 }).toString();
+      if (/Listening for channel messages from: server:ceo-agent-tools-channels/.test(pane)) return { ok: true, archivePath };
+    } catch {}
+    await sleep(500);
+  }
+  return { ok: hasMatchingSseSession(botName, new Map()), archivePath };
 }
 
 async function ensureSessionForDelivery(botName: string, botsMap: Map<string, BotContext>): Promise<boolean> {
