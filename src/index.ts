@@ -249,7 +249,7 @@ const PASSTHROUGH_MAX_LEN = 500;
 // ESC / TAB / BS bytes would be typed into the Claude Code TUI, potentially escaping
 // slash-command mode, driving ANSI parsing, or triggering autocompletes.
 const CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
-const SESSION_ARCHIVE_ROOT = process.env.TELEGRAM_SESSION_ARCHIVE_ROOT || "/home/roman/.hermes/reports/ceo-agent-tools-channels/session-archive";
+const SESSION_ARCHIVE_ROOT = process.env.TELEGRAM_SESSION_ARCHIVE_ROOT || "";
 
 async function tryHandleCommand(
   botName: string,
@@ -406,7 +406,9 @@ function startAgentSession(botName: string): boolean {
 function archivePreviousAgentSession(botName: string): string | null {
   const safeBotName = botName.replace(/[^a-zA-Z0-9_.-]/g, "_");
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const archiveDir = `${SESSION_ARCHIVE_ROOT}/${safeBotName}`;
+  const archiveDir = SESSION_ARCHIVE_ROOT
+    ? `${SESSION_ARCHIVE_ROOT}/${safeBotName}`
+    : `/srv/agents/claude-agents/${safeBotName}/logs/session-archive`;
   const archivePath = `${archiveDir}/${stamp}.txt`;
 
   try {
