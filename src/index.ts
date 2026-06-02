@@ -383,7 +383,7 @@ function startAgentSession(botName: string): boolean {
   } catch {}
 
   try {
-    const startAgentCommand = process.env.START_AGENT_COMMAND || "start-agent.sh";
+    const startAgentCommand = process.env.START_AGENT_COMMAND || "/srv/agents/bin/start-agent.sh";
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       execFileSync(startAgentCommand, [botName], { timeout: 45000, stdio: "pipe" });
       try {
