@@ -42,6 +42,21 @@ interface SseSession {
 
 const sseSessions = new Map<string, SseSession>();
 
+// --- Pending-message replay queue ---
+// When a Telegram message arrives for an agent whose SSE session is not yet
+// ready (cold start after restart), we must NEVER drop it. We queue it here and
+// replay it once the agent's SSE session connects (see SSE /sse handler) or via
+// a periodic sweeper. TTL-bounded so a never-waking agent doesn't keep stale msgs.
+interface PendingMessage {
+  msg: any;
+  botMentioned: boolean;
+  isReplyToBot: boolean;
+  enqueuedAt: number;
+}
+const pendingByBot = new Map<string, PendingMessage[]>();
+const PENDING_TTL_MS = Number(process.env.TELEGRAM_PENDING_TTL_MS || "300000"); // 5 min
+const PENDING_MAX_PER_BOT = Number(process.env.TELEGRAM_PENDING_MAX || "20");
+
 // --- Status manager (live status messages per ТЗ) ---
 let statusManager: StatusManager | null = null;
 let telemetryMode: VerbosityMode = "status";
@@ -500,7 +515,79 @@ async function ensureSessionForDelivery(botName: string, botsMap: Map<string, Bo
   return hasMatchingSseSession(botName, botsMap);
 }
 
-// --- Route channel message to matching SSE sessions; cold-start the agent if idle reaper stopped it. ---
+// --- Emit a channel message to every ready SSE session matching this bot. Returns true if delivered. ---
+function deliverToReadySessions(
+  botsMap: Map<string, BotContext>,
+  botName: string,
+  msg: any,
+  botMentioned: boolean,
+  isReplyToBot: boolean
+): boolean {
+  const aliases = getBotAliases(botName, botsMap);
+  let delivered = false;
+  for (const [, session] of sseSessions) {
+    if (session.botName === null || aliases.includes(session.botName)) {
+      // Use the session's own bot name so the agent sees its expected bot
+      const effectiveBotName = session.botName || botName;
+      emitChannelMessage(session.server, effectiveBotName, msg, botMentioned, isReplyToBot);
+      delivered = true;
+    }
+  }
+  return delivered;
+}
+
+// --- Post-delivery decoration: typing indicator + live status task. ---
+function onDelivered(botsMap: Map<string, BotContext>, botName: string, msg: any) {
+  const chatId = msg.chat?.id;
+  if (!chatId) return;
+  startTyping(botsMap, botName, chatId);
+  if (statusManager && telemetryMode !== "silent") {
+    const taskId = `${botName}:${chatId}:${Date.now()}`;
+    statusManager.startTask({
+      taskId,
+      botName,
+      chatId,
+      sourceMessageId: msg.message_id || 0,
+      mode: telemetryMode,
+    }).catch((err) => log(`status startTask error: ${err}`));
+  }
+}
+
+// --- Queue a message for replay when the agent's SSE session connects. ---
+function enqueuePending(botName: string, msg: any, botMentioned: boolean, isReplyToBot: boolean): boolean {
+  const queue = pendingByBot.get(botName) || [];
+  const wasEmpty = queue.length === 0;
+  if (queue.length >= PENDING_MAX_PER_BOT) {
+    queue.shift(); // drop oldest to bound memory; never silently drop the newest
+    log(`Pending queue for "${botName}" hit cap ${PENDING_MAX_PER_BOT}; dropped oldest`);
+  }
+  queue.push({ msg, botMentioned, isReplyToBot, enqueuedAt: Date.now() });
+  pendingByBot.set(botName, queue);
+  return wasEmpty;
+}
+
+// --- Replay queued messages to any ready session; expire stale ones (TTL). ---
+function flushAllPending(botsMap: Map<string, BotContext>) {
+  const now = Date.now();
+  for (const [botName, queue] of [...pendingByBot]) {
+    const fresh = queue.filter((p) => now - p.enqueuedAt <= PENDING_TTL_MS);
+    const expired = queue.length - fresh.length;
+    if (expired > 0) log(`Expired ${expired} stale pending message(s) for "${botName}"`);
+    if (fresh.length === 0) { pendingByBot.delete(botName); continue; }
+    if (!hasMatchingSseSession(botName, botsMap)) { pendingByBot.set(botName, fresh); continue; }
+    const remaining: PendingMessage[] = [];
+    let replayed = 0;
+    for (const p of fresh) {
+      const ok = deliverToReadySessions(botsMap, botName, p.msg, p.botMentioned, p.isReplyToBot);
+      if (ok) { onDelivered(botsMap, botName, p.msg); replayed++; }
+      else remaining.push(p);
+    }
+    if (remaining.length) pendingByBot.set(botName, remaining); else pendingByBot.delete(botName);
+    if (replayed > 0) log(`Replayed ${replayed} pending message(s) to "${botName}"`);
+  }
+}
+
+// --- Route channel message to matching SSE sessions; cold-start the agent if idle. ---
 async function routeToSessions(
   botsMap: Map<string, BotContext>,
   botName: string,
@@ -512,41 +599,23 @@ async function routeToSessions(
   const ready = await ensureSessionForDelivery(botName, botsMap);
   const aliases = getBotAliases(botName, botsMap);
 
-  let delivered = false;
-  if (ready) {
-    for (const [, session] of sseSessions) {
-      if (session.botName === null || aliases.includes(session.botName)) {
-        // Use the session's own bot name so the agent sees its expected bot
-        const effectiveBotName = session.botName || botName;
-        emitChannelMessage(session.server, effectiveBotName, msg, botMentioned, isReplyToBot);
-        delivered = true;
-      }
-    }
+  const delivered = ready && deliverToReadySessions(botsMap, botName, msg, botMentioned, isReplyToBot);
+
+  if (delivered) {
+    onDelivered(botsMap, botName, msg);
+    return;
   }
 
-  if (delivered && chatId) {
-    startTyping(botsMap, botName, chatId);
-
-    // Create live status message for this task.
-    if (statusManager && telemetryMode !== "silent") {
-      const taskId = `${botName}:${chatId}:${Date.now()}`;
-      const msgId = msg.message_id || 0;
-      statusManager.startTask({
-        taskId,
-        botName,
-        chatId,
-        sourceMessageId: msgId,
-        mode: telemetryMode,
-      }).catch((err) => log(`status startTask error: ${err}`));
-    }
-  }
-
-  if (!delivered) {
-    log(`No SSE session for bot "${botName}" after wake attempt (aliases: ${aliases.join(",")}); message not delivered`);
-    if (chatId) {
-      const bot = botsMap.get(botName);
-      bot?.telegram.sendMessage(chatId, "Не смог поднять сессию агента. DevOps уже может проверить по логам.").catch(() => {});
-    }
+  // Not ready yet: NEVER drop the message — queue it for replay when the agent's
+  // SSE session connects (or the periodic sweeper picks it up). Tell the user the
+  // honest truth instead of the old misleading "DevOps proverit po logam" string.
+  const firstForBot = enqueuePending(botName, msg, botMentioned, isReplyToBot);
+  log(`SSE session for "${botName}" not ready (aliases: ${aliases.join(",")}); message queued for replay`);
+  if (chatId && firstForBot) {
+    const bot = botsMap.get(botName);
+    bot?.telegram
+      .sendMessage(chatId, "⏳ Агент перезапускается после простоя — отвечу через ~минуту. Сообщение сохранил, повторять не нужно.")
+      .catch(() => {});
   }
 }
 
@@ -625,6 +694,10 @@ async function startSseServer(
     startPolling(null, botsMap, runtime, config.groupPolicy, config.pollInterval, "sse");
   }
 
+  // Periodic safety net: replay any queued messages to ready sessions and expire
+  // stale ones, even if the on-connect replay hook was missed.
+  setInterval(() => flushAllPending(botsMap), 15000);
+
   const httpServer = http.createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://127.0.0.1:${port}`);
 
@@ -644,6 +717,9 @@ async function startSseServer(
       });
 
       await server.connect(transport);
+      // The agent just (re)connected — replay any messages queued while it was
+      // cold-starting. Small delay lets the MCP channel finish wiring up.
+      setTimeout(() => flushAllPending(botsMap), 1500);
       return;
     }
 
