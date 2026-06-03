@@ -249,14 +249,14 @@ echo "Starting Claude Code with bot: $CLI_BOT (SSE: $SSE_HOST, model: $CLI_MODEL
 
 # --- Live status: capture CLI output and stream to Telegram ---
 # Reads telegramTelemetry from .claude-tg.json (silent = no watcher).
-TELEMETRY_MODE="status"
+TELEMETRY_MODE="verbose"
 if [[ -f "$AGENT_DEFAULTS_PATH" ]]; then
   TELEMETRY_MODE=$(python3 -c "
 import json
 try:
     d=json.load(open('$AGENT_DEFAULTS_PATH'))
-    print(d.get('telegramTelemetry','status'))
-except: print('status')
+    print(d.get('telegramTelemetry','verbose'))
+except: print('verbose')
 " 2>/dev/null)
 fi
 

@@ -332,7 +332,7 @@ export function loadTelemetryConfig(agentDir: string): {
   model?: string;
   effort?: string;
 } {
-  const defaults = { mode: "status" as VerbosityMode };
+  const defaults = { mode: "verbose" as VerbosityMode };
   try {
     const fs = require("node:fs");
     const path = require("node:path");
@@ -342,7 +342,7 @@ export function loadTelemetryConfig(agentDir: string): {
     return {
       mode: (["silent", "status", "verbose"].includes(raw.telegramTelemetry)
         ? raw.telegramTelemetry
-        : "status") as VerbosityMode,
+        : "verbose") as VerbosityMode,
       model: raw.model,
       effort: raw.effort,
     };
