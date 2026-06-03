@@ -65,6 +65,29 @@ def is_chrome(line: str) -> bool:
 TAIL_WINDOW = 256 * 1024  # 256 KB — O(1) per tick regardless of log size
 
 
+def _char_data(char) -> str:
+    """Return safe printable pyte Char data.
+
+    pyte.screen.display can crash on rare empty Char.data values (IndexError in
+    wcwidth(char[0])). Render rows ourselves and normalize empty cells to a
+    space so live status never reports renderer failures for valid TTY logs.
+    """
+    data = getattr(char, "data", " ")
+    return data if data else " "
+
+
+def _render_row(row, columns: int) -> str:
+    if isinstance(row, dict):
+        return "".join(
+            _char_data(row.get(x, pyte.screens.Char(" ")))
+            for x in range(columns)
+        )
+    cells = list(row)
+    if len(cells) < columns:
+        cells.extend([pyte.screens.Char(" ")] * (columns - len(cells)))
+    return "".join(_char_data(c) for c in cells[:columns])
+
+
 def render(path: str, max_lines: int = 80) -> str:
     max_lines = max(max_lines, 80)  # clamp so existing watchers passing 25 still get 80
     size = os.path.getsize(path)
@@ -94,16 +117,12 @@ def render(path: str, max_lines: int = 80) -> str:
     # (dict or tuple of Char objects depending on pyte internal version).
     history_lines = []
     for row in screen.history.top:
-        if isinstance(row, dict):
-            line = "".join(
-                row.get(x, pyte.screens.Char(" ")).data
-                for x in range(screen.columns)
-            )
-        else:
-            line = "".join(getattr(c, "data", " ") for c in row)
-        history_lines.append(line.rstrip())
+        history_lines.append(_render_row(row, screen.columns).rstrip())
 
-    display_lines = [line.rstrip() for line in screen.display]
+    display_lines = [
+        _render_row(screen.buffer[y], screen.columns).rstrip()
+        for y in range(screen.lines)
+    ]
     lines = history_lines + display_lines
 
     lines = [l for l in lines if not is_chrome(l)]
