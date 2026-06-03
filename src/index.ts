@@ -1131,11 +1131,24 @@ async function transcribeAudioFile(filePath: string, botName: string): Promise<s
 
 async function enrichMedia(
   telegram: TelegramClient,
-  msg: { photo?: any[]; document?: any; voice?: any; audio?: any; caption?: string; text?: string },
+  msg: { photo?: any[]; document?: any; voice?: any; audio?: any; contact?: any; caption?: string; text?: string },
   text: string,
   botName: string
 ): Promise<string> {
   const fs = await import("node:fs/promises");
+
+  if (msg.contact) {
+    const c = msg.contact;
+    const fullName = [c.first_name, c.last_name].filter(Boolean).join(" ").trim();
+    const parts = [
+      `[contact card: name="${fullName || c.first_name || "unknown"}"`,
+      `phone="${c.phone_number || ""}"`,
+      c.user_id ? `telegram_user_id=${c.user_id}` : null,
+      c.vcard ? `vcard=${JSON.stringify(String(c.vcard))}` : null,
+    ].filter(Boolean);
+    text = `${parts.join(" ")}]${text ? "\n" + text : ""}`;
+    log(`[${botName}] Contact card received: ${fullName || c.first_name || "unknown"}`);
+  }
 
   if (msg.photo && msg.photo.length > 0) {
     try {

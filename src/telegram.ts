@@ -52,6 +52,14 @@ export interface TelegramAudio {
   file_size?: number;
 }
 
+export interface TelegramContact {
+  phone_number: string;
+  first_name: string;
+  last_name?: string;
+  user_id?: number;
+  vcard?: string;
+}
+
 export interface TelegramMessageEntity {
   type: string;
   offset: number;
@@ -71,6 +79,7 @@ export interface TelegramMessage {
   document?: TelegramDocument;
   voice?: TelegramVoice;
   audio?: TelegramAudio;
+  contact?: TelegramContact;
   reply_to_message?: TelegramMessage;
   entities?: TelegramMessageEntity[];
   caption_entities?: TelegramMessageEntity[];
