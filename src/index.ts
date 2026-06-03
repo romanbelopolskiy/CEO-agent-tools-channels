@@ -894,7 +894,7 @@ function startPolling(
           if (!update.message?.from) continue;
 
           const msg = update.message;
-          if (!msg.text && !msg.photo && !msg.document && !msg.voice && !msg.audio) continue;
+          if (!msg.text && !msg.photo && !msg.document && !msg.voice && !msg.audio && !msg.contact) continue;
 
           const userId = msg.from!.id;
           const chatType = msg.chat.type || "private";
