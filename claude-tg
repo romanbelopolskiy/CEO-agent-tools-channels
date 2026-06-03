@@ -278,7 +278,7 @@ if [[ "$TELEMETRY_MODE" != "silent" && -n "$WATCHER_CHAT_ID" ]]; then
   if script --help 2>&1 | grep -q -- ' -c,'; then
     # Linux util-linux: script [options] [file], command must be passed via -c.
     EXTRA_ARGS="${(j: :)${(q)CLAUDE_ARGS}}"
-    DEV_ARGS="${(j: :)${(q)DEV_CHANNEL_ARGS}}"
+    DEV_ARGS="${(j: :)DEV_CHANNEL_ARGS}"
     script -q -c "claude $DEV_ARGS --dangerously-skip-permissions --model ${(q)CLI_MODEL} --effort ${(q)CLI_EFFORT} $EXTRA_ARGS" "$CLI_LOG"
   else
     # BSD/macOS script accepts: script -q logfile command args...
