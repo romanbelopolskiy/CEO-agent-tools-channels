@@ -130,6 +130,15 @@ except Exception:
     pass
 PY
 ))
+  DEFAULT_ULTRACODE=$(python3 - <<PY 2>/dev/null
+import json
+try:
+    data=json.load(open('$AGENT_DEFAULTS_PATH'))
+    print('true' if data.get('ultracode') is True else '')
+except Exception:
+    print('')
+PY
+)
 fi
 
 if [[ -z "$CLI_MODEL" && -n "$DEFAULT_MODEL" ]]; then
@@ -165,8 +174,10 @@ case "$CLI_MODEL" in
     ;;
 esac
 
-# Interactive effort selection if not provided and no defaults file value
-if [[ -z "$CLI_EFFORT" ]]; then
+# Interactive effort selection if not provided and no defaults file value.
+# Ultracode is a separate Claude Code session mode enabled through --settings,
+# not an effort level; for ultracode sessions do not force --effort.
+if [[ -z "$CLI_EFFORT" && "$DEFAULT_ULTRACODE" != "true" ]]; then
   echo ""
   echo "Select effort:"
   echo "  1) low"
@@ -187,7 +198,7 @@ if [[ -z "$CLI_EFFORT" ]]; then
 fi
 
 case "$CLI_EFFORT" in
-  low|medium|high|max) ;;
+  ""|low|medium|high|max) ;;
   *)
     echo "Invalid effort: $CLI_EFFORT"
     echo "Use one of: low, medium, high, max"
@@ -195,7 +206,13 @@ case "$CLI_EFFORT" in
     ;;
 esac
 
-# Development channels: every Telegram agent needs the MCP server channel; selected agents may add modes like ultracode.
+ULTRACODE_SETTINGS_ARGS=()
+if [[ "$DEFAULT_ULTRACODE" == "true" ]]; then
+  ULTRACODE_SETTINGS_ARGS=(--settings '{"ultracode": true}')
+fi
+
+# Development channels: every Telegram agent needs the MCP server channel.
+# Ultracode is not a development channel; it is passed per session via --settings.
 if [[ ${#DEFAULT_DEVELOPMENT_CHANNELS[@]} -eq 0 ]]; then
   DEFAULT_DEVELOPMENT_CHANNELS=(server:ceo-agent-tools-channels)
 elif [[ ! " ${DEFAULT_DEVELOPMENT_CHANNELS[*]} " =~ " server:ceo-agent-tools-channels " ]]; then
@@ -228,7 +245,7 @@ if [[ ! -f "$AGENT_MCP" ]] || ! grep -q "3200" "$AGENT_MCP" 2>/dev/null; then
 EOF
 fi
 
-echo "Starting Claude Code with bot: $CLI_BOT (SSE: $SSE_HOST, model: $CLI_MODEL, effort: $CLI_EFFORT)"
+echo "Starting Claude Code with bot: $CLI_BOT (SSE: $SSE_HOST, model: $CLI_MODEL, effort: ${CLI_EFFORT:-default}, ultracode: ${DEFAULT_ULTRACODE:-false})"
 
 # --- Live status: capture CLI output and stream to Telegram ---
 # Reads telegramTelemetry from .claude-tg.json (silent = no watcher).
@@ -274,16 +291,23 @@ if [[ "$TELEMETRY_MODE" != "silent" && -n "$WATCHER_CHAT_ID" ]]; then
   "$SCRIPT_DIR/status-watcher.sh" "$CLI_LOG" "$CLI_BOT" "$WATCHER_CHAT_ID" "$SSE_HOST" &
   WATCHER_PID=$!
   echo "Live status watcher started (PID $WATCHER_PID, chat $WATCHER_CHAT_ID)"
-  CMD=(claude "${DEV_CHANNEL_ARGS[@]}" --dangerously-skip-permissions --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}")
+  EFFORT_ARGS=()
+  if [[ -n "$CLI_EFFORT" ]]; then
+    EFFORT_ARGS=(--effort "$CLI_EFFORT")
+  fi
+  CMD=(claude "${DEV_CHANNEL_ARGS[@]}" "${ULTRACODE_SETTINGS_ARGS[@]}" --dangerously-skip-permissions --model "$CLI_MODEL" "${EFFORT_ARGS[@]}" "${CLAUDE_ARGS[@]}")
   if script --help 2>&1 | grep -q -- ' -c,'; then
     # Linux util-linux: script [options] [file], command must be passed via -c.
-    EXTRA_ARGS="${(j: :)${(q)CLAUDE_ARGS}}"
-    DEV_ARGS="${(j: :)DEV_CHANNEL_ARGS}"
-    script -q -c "claude $DEV_ARGS --dangerously-skip-permissions --model ${(q)CLI_MODEL} --effort ${(q)CLI_EFFORT} $EXTRA_ARGS" "$CLI_LOG"
+    CMD_STRING="${(j: :)${(@qq)CMD}}"
+    script -q -c "$CMD_STRING" "$CLI_LOG"
   else
     # BSD/macOS script accepts: script -q logfile command args...
     script -q "$CLI_LOG" "${CMD[@]}"
   fi
 else
-  claude "${DEV_CHANNEL_ARGS[@]}" --dangerously-skip-permissions --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}"
+  EFFORT_ARGS=()
+  if [[ -n "$CLI_EFFORT" ]]; then
+    EFFORT_ARGS=(--effort "$CLI_EFFORT")
+  fi
+  claude "${DEV_CHANNEL_ARGS[@]}" "${ULTRACODE_SETTINGS_ARGS[@]}" --dangerously-skip-permissions --model "$CLI_MODEL" "${EFFORT_ARGS[@]}" "${CLAUDE_ARGS[@]}"
 fi
