@@ -118,6 +118,18 @@ except Exception:
     print('')
 PY
 )
+  DEFAULT_DEVELOPMENT_CHANNELS=($(python3 - <<PY 2>/dev/null
+import json
+try:
+    data=json.load(open('$AGENT_DEFAULTS_PATH'))
+    channels=data.get('developmentChannels') or []
+    if isinstance(channels, str):
+        channels=[channels]
+    print('\n'.join(str(c) for c in channels if c))
+except Exception:
+    pass
+PY
+))
 fi
 
 if [[ -z "$CLI_MODEL" && -n "$DEFAULT_MODEL" ]]; then
@@ -182,6 +194,17 @@ case "$CLI_EFFORT" in
     exit 1
     ;;
 esac
+
+# Development channels: every Telegram agent needs the MCP server channel; selected agents may add modes like ultracode.
+if [[ ${#DEFAULT_DEVELOPMENT_CHANNELS[@]} -eq 0 ]]; then
+  DEFAULT_DEVELOPMENT_CHANNELS=(server:ceo-agent-tools-channels)
+elif [[ ! " ${DEFAULT_DEVELOPMENT_CHANNELS[*]} " =~ " server:ceo-agent-tools-channels " ]]; then
+  DEFAULT_DEVELOPMENT_CHANNELS+=(server:ceo-agent-tools-channels)
+fi
+DEV_CHANNEL_ARGS=()
+for channel in "${DEFAULT_DEVELOPMENT_CHANNELS[@]}"; do
+  DEV_CHANNEL_ARGS+=(--dangerously-load-development-channels "$channel")
+done
 
 # Check SSE server
 if ! curl -sf "$SSE_HOST/health" >/dev/null 2>&1; then
@@ -251,15 +274,16 @@ if [[ "$TELEMETRY_MODE" != "silent" && -n "$WATCHER_CHAT_ID" ]]; then
   "$SCRIPT_DIR/status-watcher.sh" "$CLI_LOG" "$CLI_BOT" "$WATCHER_CHAT_ID" "$SSE_HOST" &
   WATCHER_PID=$!
   echo "Live status watcher started (PID $WATCHER_PID, chat $WATCHER_CHAT_ID)"
-  CMD=(claude --dangerously-load-development-channels server:ceo-agent-tools-channels --dangerously-skip-permissions --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}")
+  CMD=(claude "${DEV_CHANNEL_ARGS[@]}" --dangerously-skip-permissions --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}")
   if script --help 2>&1 | grep -q -- ' -c,'; then
     # Linux util-linux: script [options] [file], command must be passed via -c.
     EXTRA_ARGS="${(j: :)${(q)CLAUDE_ARGS}}"
-    script -q -c "claude --dangerously-load-development-channels server:ceo-agent-tools-channels --dangerously-skip-permissions --model ${(q)CLI_MODEL} --effort ${(q)CLI_EFFORT} $EXTRA_ARGS" "$CLI_LOG"
+    DEV_ARGS="${(j: :)${(q)DEV_CHANNEL_ARGS}}"
+    script -q -c "claude $DEV_ARGS --dangerously-skip-permissions --model ${(q)CLI_MODEL} --effort ${(q)CLI_EFFORT} $EXTRA_ARGS" "$CLI_LOG"
   else
     # BSD/macOS script accepts: script -q logfile command args...
     script -q "$CLI_LOG" "${CMD[@]}"
   fi
 else
-  claude --dangerously-load-development-channels server:ceo-agent-tools-channels --dangerously-skip-permissions --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}"
+  claude "${DEV_CHANNEL_ARGS[@]}" --dangerously-skip-permissions --model "$CLI_MODEL" --effort "$CLI_EFFORT" "${CLAUDE_ARGS[@]}"
 fi
