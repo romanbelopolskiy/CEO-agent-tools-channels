@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 BRIDGE_MARKER = "server:ceo-agent-tools-channels"
-AGENTS_ROOT = Path(os.environ.get("CLAUDE_AGENTS_ROOT", ".")).resolve()
+AGENTS_ROOT = Path(os.environ.get("CLAUDE_AGENTS_ROOT", "/srv/agents/claude-agents")).resolve()
 
 
 def _read_text(path: str) -> str:
@@ -65,7 +65,14 @@ def _children(pid: int) -> list[int]:
 
 def _is_script_wrapper(pid: int) -> bool:
     cmd = _cmdline(pid)
-    return cmd.startswith("script -q -c claude ") and BRIDGE_MARKER in cmd
+    # util-linux `script -c` stores the shell-quoted command in /proc/cmdline,
+    # commonly as: script -q -c 'claude' '--dangerously-...'. Match both the
+    # unquoted and quoted forms so prestart cleanup can remove stale same-agent
+    # wrappers before a fresh tmux session starts.
+    return (
+        (cmd.startswith("script -q -c claude ") or cmd.startswith("script -q -c 'claude' "))
+        and BRIDGE_MARKER in cmd
+    )
 
 
 def _is_bridge_claude(pid: int) -> bool:
