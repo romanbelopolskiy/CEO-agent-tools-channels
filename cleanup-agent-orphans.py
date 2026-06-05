@@ -95,7 +95,13 @@ def _agent_from_cwd(cwd: str | None) -> str | None:
 
 
 def iter_wrappers() -> list[dict]:
-    out = subprocess.run(["pgrep", "-f", f"^script -q -c claude .*{BRIDGE_MARKER}"], capture_output=True, text=True, check=False).stdout
+    # Match both util-linux cmdline forms:
+    #   script -q -c claude ...
+    #   script -q -c 'claude' ...
+    # A too-narrow pgrep here makes --prestart miss stale same-agent wrappers,
+    # so the fresh tmux session exits immediately because the old bridge Claude
+    # still holds the per-bot flock.
+    out = subprocess.run(["pgrep", "-f", f"^script -q -c .*{BRIDGE_MARKER}"], capture_output=True, text=True, check=False).stdout
     rows = []
     for raw in out.split():
         if not raw.isdigit():
