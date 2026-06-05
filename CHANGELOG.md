@@ -8,6 +8,7 @@ This changelog is intentionally sanitized. Historical operational entries that c
 
 ## Unreleased
 
+- Added local `POST /inject-mirror` endpoint: the task scheduler mirrors each injected cron/registry task to the bot owner's Telegram chat (copy marker, truncated, plain text, fire-and-forget), so the owner sees when an agent picks up work. Registry pickups mirror the actual claimable task titles instead of the generic claim prompt; deterministic script probes are not mirrored. Bot tokens stay inside the bridge.
 - Live-status watcher now skips the render+POST tick when the agent log has not advanced (size:mtime change-detection), eliminating the idle-time renderer storm that pinned host CPU; verbose updates still fire the instant the log grows. Watcher also self-terminates when its log is removed, preventing orphan watchers across restarts.
 - Documentation now focuses only on the agent-to-MCP bridge contract.
 - Removed private deployment procedure details from committed instructions.

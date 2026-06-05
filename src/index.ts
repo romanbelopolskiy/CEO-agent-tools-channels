@@ -794,6 +794,80 @@ async function startSseServer(
       return;
     }
 
+    // --- Inject mirror: scheduler posts a copy of every task injected into an
+    // agent so the bot owner sees, in their chat with that bot, that the agent
+    // received work. Called fire-and-forget from cron-task-scheduler.py right
+    // after the tmux send-keys. Must never throw back at the caller and must not
+    // leak any bot token (tokens stay inside this process). ---
+    if (req.method === "POST" && url.pathname === "/inject-mirror") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      try {
+        const data = JSON.parse(body) as {
+          botName?: string;
+          text?: string;
+          kind?: string;
+        };
+        const botName = typeof data.botName === "string" ? data.botName.trim() : "";
+        const rawText = typeof data.text === "string" ? data.text.trim() : "";
+        if (!botName || !rawText) {
+          res.writeHead(400, { "Content-Type": "text/plain" });
+          res.end("missing botName or text");
+          return;
+        }
+        const bot = botsMap.get(botName);
+        if (!bot) {
+          // Unknown bot — no-op (never crash the scheduler's fire-and-forget call).
+          debug(`inject-mirror: unknown bot "${botName}", skipping`);
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("unknown bot");
+          return;
+        }
+        // Owner's chat = first allowlisted user for this bot (resolved from the
+        // bot's local private access config at runtime). Optional env fallback
+        // for headless setups; if neither is present, skip — no real chat IDs
+        // are hardcoded here so the repo stays sanitized.
+        const envChat = Number(process.env.INJECT_MIRROR_DEFAULT_CHAT || "");
+        const chatId =
+          bot.access.listUsers()[0] ??
+          (Number.isFinite(envChat) && envChat !== 0 ? envChat : 0);
+        if (!chatId) {
+          debug(`inject-mirror: no allowlisted chat for bot "${botName}", skipping`);
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("no chat");
+          return;
+        }
+        // Phone-friendly copy: truncate long prompts, do not paste the full payload.
+        const MAX = 400;
+        const clipped =
+          rawText.length > MAX ? rawText.slice(0, MAX).trimEnd() + " …" : rawText;
+        const message = `🔻 Агент ${botName} получил задачу:\n\n${clipped}`;
+        try {
+          // Plain text (parseMode ""): task titles/prompts may contain Markdown
+          // metacharacters; we must not let them break or reinterpret the copy.
+          const sent = await bot.telegram.sendMessage(chatId, message, "");
+          logConversation({
+            botName,
+            direction: "system",
+            chatId,
+            messageId: sent?.message_id,
+            text: message,
+            meta: { kind: "inject-mirror", injectKind: data.kind || "cron" },
+          });
+        } catch (err) {
+          debug(
+            `inject-mirror sendMessage failed for ${botName}:${chatId}: ${(err as Error).message}`,
+          );
+        }
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("ok");
+      } catch {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("bad json");
+      }
+      return;
+    }
+
     // --- Health check ---
     if (req.method === "GET" && url.pathname === "/health") {
       const info = {

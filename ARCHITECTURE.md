@@ -31,6 +31,7 @@ Agents interact only with the bridge. The bridge interacts with Telegram.
 - Download voice/audio/files and pass safe local references to agents.
 - Optionally transcribe voice/audio before forwarding the message to the agent.
 - Manage live status messages.
+- Mirror scheduler-injected tasks to the bot owner's chat (local `POST /inject-mirror`), so the owner sees when an agent picks up cron/registry work.
 - Prevent duplicate live sessions for the same bot where supported by the launcher.
 
 ## Prohibited for agents
@@ -85,6 +86,14 @@ Agents should use this data only to complete the user task and route the reply t
 ## Outbound reply contract
 
 Agents should send concise final replies through the bridge MCP send tool. The bridge owns final Telegram delivery and error handling.
+
+## Local control endpoints
+
+The bridge exposes localhost-only HTTP endpoints for trusted same-host processes (never exposed publicly):
+
+- `POST /status-feed` — live CLI status feed for the active task message.
+- `POST /inject-mirror` — body `{botName, text, kind?}`. Mirrors a scheduler-injected task to the bot owner's chat with a copy marker. Resolves the owner chat from the bot's local access config, truncates long text, sends as plain text, is fire-and-forget (best-effort), and no-ops on unknown bot / empty text / no resolved chat. Bot tokens never leave the bridge process; callers post only plain text to localhost.
+- `GET /health` — liveness and registry snapshot.
 
 ## Privacy rule
 
