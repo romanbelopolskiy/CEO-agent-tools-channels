@@ -169,16 +169,22 @@ export class TelegramClient {
   async sendMessage(
     chatId: number,
     text: string,
-    parseMode: string = "Markdown"
+    parseMode: string = "Markdown",
+    replyMarkup?: unknown
   ): Promise<TelegramMessage> {
     const params: Record<string, unknown> = { chat_id: chatId, text };
     if (parseMode) params.parse_mode = parseMode;
+    // Optional custom keyboard / reply markup. Absent => omitted entirely, so
+    // the request body is byte-identical to today for callers that don't use it.
+    if (replyMarkup !== undefined) params.reply_markup = replyMarkup;
     try {
       return await this.request<TelegramMessage>("sendMessage", params);
     } catch (error) {
       if (parseMode && this.isParseModeError(error)) {
         debug("sendMessage parse_mode failed; retrying as plain text");
-        return this.request<TelegramMessage>("sendMessage", { chat_id: chatId, text });
+        const retry: Record<string, unknown> = { chat_id: chatId, text };
+        if (replyMarkup !== undefined) retry.reply_markup = replyMarkup;
+        return this.request<TelegramMessage>("sendMessage", retry);
       }
       throw error;
     }
@@ -188,7 +194,8 @@ export class TelegramClient {
     chatId: number,
     filePath: string,
     caption?: string,
-    parseMode: string = "Markdown"
+    parseMode: string = "Markdown",
+    replyMarkup?: unknown
   ): Promise<TelegramMessage> {
     const url = `${this.baseUrl}/sendDocument`;
     debug(`API call: sendDocument(${JSON.stringify({ chatId, filePath, caption: caption ? "<caption>" : undefined })})`);
@@ -200,6 +207,11 @@ export class TelegramClient {
     if (caption) {
       form.append("caption", caption);
       form.append("parse_mode", parseMode);
+    }
+    // Optional reply markup, JSON-encoded per the Bot API multipart contract.
+    // Absent => field omitted, so document sends are unchanged for the 11 bots.
+    if (replyMarkup !== undefined) {
+      form.append("reply_markup", JSON.stringify(replyMarkup));
     }
 
     const res = await fetch(url, { method: "POST", body: form });
@@ -214,7 +226,7 @@ export class TelegramClient {
       debug(`API error: sendDocument -> ${errMsg}`);
       if (caption && parseMode && this.isParseModeError(errMsg)) {
         debug("sendDocument caption parse_mode failed; retrying caption as plain text");
-        return this.sendDocument(chatId, filePath, caption, "");
+        return this.sendDocument(chatId, filePath, caption, "", replyMarkup);
       }
       throw new Error(errMsg);
     }
@@ -224,7 +236,7 @@ export class TelegramClient {
       debug(`API error: sendDocument -> ${errMsg}`);
       if (caption && parseMode && this.isParseModeError(errMsg)) {
         debug("sendDocument caption parse_mode failed; retrying caption as plain text");
-        return this.sendDocument(chatId, filePath, caption, "");
+        return this.sendDocument(chatId, filePath, caption, "", replyMarkup);
       }
       throw new Error(errMsg);
     }

@@ -19,6 +19,7 @@ import { log, debug, logConversation } from "./logger.js";
 import { TYPING_INTERVAL_MS, TYPING_TIMEOUT_MS, DEFAULT_SSE_PORT, STATUS_GC_INTERVAL_MS } from "./constants.js";
 import { StatusManager, loadTelemetryConfig, type VerbosityMode } from "./status-messages.js";
 import { maybeGate } from "./auto-compact.js";
+import { isOutgoingOnly } from "./outgoing-only.js";
 
 const OPENAI_TRANSCRIPTIONS_URL = process.env.TELEGRAM_STT_OPENAI_URL || "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_TRANSCRIPTIONS_MODEL = process.env.TELEGRAM_STT_MODEL || "whisper-1";
@@ -946,6 +947,16 @@ function startPolling(
   const { ctx, permissions, me, botUsername } = runtime;
   const { name: botName, telegram, access } = ctx;
   const pairingNotified = new Set<number>();
+
+  // Fleet outgoing-only guard: worker processes (CEO_AGENT_OUTGOING_ONLY=1) must
+  // NOT start a second getUpdates loop on the shared bot token (Telegram returns
+  // 409 Conflict for a 2nd poller). They still SEND via send_telegram_message
+  // over the SSE bridge. Unset/empty => normal polling, so the base and the 11
+  // existing bots are unaffected.
+  if (isOutgoingOnly()) {
+    log(`[${botName}] Outgoing-only mode: inbound polling disabled (worker process)`);
+    return;
+  }
 
   const poll = async () => {
     await telegram.deleteWebhook(true);

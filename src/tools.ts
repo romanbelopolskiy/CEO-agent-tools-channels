@@ -8,6 +8,8 @@ import type { AccessControl } from "./access.js";
 import type { StatusManager } from "./status-messages.js";
 
 import { debug, log, logConversation } from "./logger.js";
+import { applyInstanceTag } from "./instance-tag.js";
+import { buildReplyMarkup } from "./reply-markup.js";
 
 export interface BotContext {
   name: string;
@@ -38,6 +40,20 @@ const TOOLS = [
         file_path: {
           type: "string",
           description: "Optional absolute local file path to send as a Telegram document attachment",
+        },
+        keyboard: {
+          type: "array",
+          description:
+            "Optional custom reply keyboard as a grid of button labels (rows of strings). Renders a persistent, resizable keyboard. Omit for a normal message (default).",
+          items: {
+            type: "array",
+            items: { type: "string" },
+          },
+        },
+        reply_markup: {
+          type: "object",
+          description:
+            "Optional raw Telegram reply markup passthrough (ReplyKeyboardMarkup / ReplyKeyboardRemove / InlineKeyboardMarkup / ForceReply). Takes precedence over 'keyboard' when both are given. Omit for a normal message (default).",
         },
       },
       required: ["bot_name", "chat_id"],
@@ -159,6 +175,9 @@ export function registerTools(
         const chatId = args?.chat_id as number;
         const text = (args?.text as string) || "";
         const filePath = args?.file_path as string | undefined;
+        // Optional custom keyboard / reply markup. `undefined` when neither
+        // `keyboard` nor `reply_markup` is supplied => byte-identical to today.
+        const replyMarkup = buildReplyMarkup(args?.keyboard, args?.reply_markup);
 
         const bot = getBot(botName);
         if (!bot) {
@@ -179,16 +198,24 @@ export function registerTools(
 
         try {
           onMessageSent?.(botName, chatId);
+          // Fleet sender-ID tag: injected IFF CEO_AGENT_INSTANCE_ID is set
+          // (worker processes only). Unset/empty => byte-identical to today.
+          const instanceId = process.env.CEO_AGENT_INSTANCE_ID;
+          const taggedText = applyInstanceTag(text, instanceId);
+          const taggedCaption = (() => {
+            const t = applyInstanceTag(text, instanceId);
+            return t.length ? t : undefined;
+          })();
           const sent = filePath
-            ? await bot.telegram.sendDocument(chatId, filePath, text || undefined)
-            : await bot.telegram.sendMessage(chatId, text);
+            ? await bot.telegram.sendDocument(chatId, filePath, taggedCaption, "Markdown", replyMarkup)
+            : await bot.telegram.sendMessage(chatId, taggedText, "Markdown", replyMarkup);
           logConversation({
             botName,
             direction: "outbound",
             chatId,
             messageId: typeof sent === "object" ? sent.message_id : undefined,
             chatType: typeof sent === "object" ? sent.chat?.type : undefined,
-            text: filePath ? `${text || ""}\n[document sent: ${filePath}]`.trim() : text,
+            text: filePath ? `${taggedText || ""}\n[document sent: ${filePath}]`.trim() : taggedText,
             meta: { via: "send_telegram_message", filePath },
           });
 
