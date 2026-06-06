@@ -85,9 +85,18 @@ export interface TelegramMessage {
   caption_entities?: TelegramMessageEntity[];
 }
 
+export interface TelegramCallbackQuery {
+  id: string;
+  from: TelegramUser;
+  message?: TelegramMessage;
+  chat_instance?: string;
+  data?: string;
+}
+
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
 }
 
 interface TelegramResponse<T> {
@@ -156,8 +165,27 @@ export class TelegramClient {
       offset,
       timeout,
       limit,
-      allowed_updates: ["message"],
+      // "callback_query" added so inbound inline-button taps reach the bridge.
+      // Back-compat: requesting an extra update type changes nothing for bots
+      // that never send inline keyboards — those updates simply never arrive.
+      allowed_updates: ["message", "callback_query"],
     });
+  }
+
+  /**
+   * Acknowledge an inline-button tap so Telegram stops the client-side spinner.
+   * `text`, when provided, is shown as a brief toast to the user. Mirrors the
+   * existing `request` helper used by every other Bot API method here.
+   */
+  async answerCallbackQuery(
+    callbackQueryId: string,
+    text?: string
+  ): Promise<boolean> {
+    const params: Record<string, unknown> = {
+      callback_query_id: callbackQueryId,
+    };
+    if (text !== undefined) params.text = text;
+    return this.request<boolean>("answerCallbackQuery", params);
   }
 
   async deleteWebhook(dropPendingUpdates: boolean = false): Promise<boolean> {

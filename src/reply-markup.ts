@@ -49,6 +49,47 @@ export function buildReplyMarkup(
   return undefined;
 }
 
+/**
+ * Build a one-button `InlineKeyboardMarkup` (a button that lives UNDER a
+ * message and, when tapped, fires a `callback_query` back to the bridge rather
+ * than sending a chat message). Pure / side-effect free.
+ *
+ * @param label        Button caption shown to the user.
+ * @param callbackData Opaque string echoed back in `callback_query.data` on tap
+ *                     (Telegram limit: 1–64 bytes; not enforced here).
+ * @returns `{ inline_keyboard: [[{ text, callback_data }]] }`.
+ */
+export function buildInlineReplyButton(
+  label: string,
+  callbackData: string
+): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
+  return {
+    inline_keyboard: [[{ text: label, callback_data: callbackData }]],
+  };
+}
+
+/**
+ * Build an ephemeral quick-reply `ReplyKeyboardMarkup` from a flat list of
+ * options, one button per row. `one_time_keyboard: true` makes it disappear
+ * after a single tap; `resize_keyboard: true` keeps it compact. Pure /
+ * side-effect free. Tapping a button sends that option's text as a normal
+ * message (not a callback_query).
+ *
+ * @param options Button labels; each becomes its own row.
+ * @returns A `ReplyKeyboardMarkup` object.
+ */
+export function buildOneTimeKeyboard(options: string[]): {
+  keyboard: Array<Array<{ text: string }>>;
+  one_time_keyboard: true;
+  resize_keyboard: true;
+} {
+  return {
+    keyboard: options.map((label) => [{ text: label }]),
+    one_time_keyboard: true,
+    resize_keyboard: true,
+  };
+}
+
 /** True for a non-null, non-array object literal. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return (
