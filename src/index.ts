@@ -20,6 +20,7 @@ import { TYPING_INTERVAL_MS, TYPING_TIMEOUT_MS, DEFAULT_SSE_PORT, STATUS_GC_INTE
 import { StatusManager, loadTelemetryConfig, type VerbosityMode } from "./status-messages.js";
 import { maybeGate } from "./auto-compact.js";
 import { isOutgoingOnly } from "./outgoing-only.js";
+import { synthesizeCallbackMessage } from "./callback-query.js";
 
 const OPENAI_TRANSCRIPTIONS_URL = process.env.TELEGRAM_STT_OPENAI_URL || "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_TRANSCRIPTIONS_MODEL = process.env.TELEGRAM_STT_MODEL || "whisper-1";
@@ -975,6 +976,62 @@ function startPolling(
 
         for (const update of updates) {
           offset = update.update_id + 1;
+
+          // --- Inline-button tap (callback_query) ---
+          // Forward the tap to the agent over the SAME inbound path normal text
+          // uses, then ALWAYS ack to stop Telegram's client-side spinner. The
+          // bridge never manages fleet/reply-target state itself — the agent
+          // acts on the `[button] <data>` marker via its own MCP. Fully opt-in:
+          // updates of this type only arrive once an inline button was sent.
+          if (update.callback_query && !update.message) {
+            const cbq = update.callback_query;
+            try {
+              const synthetic = synthesizeCallbackMessage(cbq);
+              if (synthetic) {
+                const cbUserId = cbq.from?.id;
+                const cbChatId = cbq.message?.chat?.id;
+                // Honor access control just like a normal private inbound: only
+                // deliver taps from a paired user; otherwise ack + ignore.
+                if (
+                  cbUserId !== undefined &&
+                  cbChatId !== undefined &&
+                  access.isAllowed(cbUserId, cbChatId)
+                ) {
+                  logConversation({
+                    botName,
+                    direction: "inbound",
+                    chatId: cbChatId,
+                    userId: cbUserId,
+                    username: cbq.from?.username || cbq.from?.first_name || "unknown",
+                    messageId: synthetic.message_id,
+                    chatType: synthetic.chat.type || "private",
+                    text: synthetic.text || "",
+                    meta: { isGroup: false, callbackQuery: true },
+                  });
+                  log(`[${botName}] Inline button tap from @${cbq.from?.username || cbq.from?.first_name}: ${synthetic.text}`);
+                  if (mode === "stdio" && stdioServer) {
+                    emitChannelMessage(stdioServer, botName, synthetic, false, false);
+                  } else {
+                    routeToSessions(botsMap, botName, synthetic, false, false);
+                  }
+                } else {
+                  log(`[${botName}] Inline button tap ignored (user not allowed or no chat context)`);
+                }
+              } else {
+                log(`[${botName}] Inline button tap with no routable chat context; acking only`);
+              }
+            } catch (cbErr) {
+              log(`[${botName}] callback_query handling error: ${cbErr}`);
+            }
+            // Always acknowledge so the user's button spinner stops, even on
+            // ignore/error. Never throw out of the poll loop for an ack failure.
+            try {
+              await telegram.answerCallbackQuery(cbq.id);
+            } catch (ackErr) {
+              log(`[${botName}] answerCallbackQuery failed: ${ackErr}`);
+            }
+            continue;
+          }
 
           if (!update.message?.from) continue;
 
