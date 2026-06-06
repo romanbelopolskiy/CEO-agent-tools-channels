@@ -8,6 +8,8 @@ This changelog is intentionally sanitized. Historical operational entries that c
 
 ## Unreleased
 
+- Added callback-query support for inline Telegram buttons in the bridge: `getUpdates` now accepts `callback_query`, taps are acknowledged via `answerCallbackQuery`, and allowed taps are delivered to the agent as synthetic `[button] <callback_data>` messages.
+- Added fleet/quick-reply button helpers: one-message inline reply buttons for worker addressing and one-time lower keyboards for discrete quick replies, both optional and backward-compatible.
 - Added local `POST /inject-mirror` endpoint: the task scheduler mirrors each injected cron/registry task to the bot owner's Telegram chat (copy marker, truncated, plain text, fire-and-forget), so the owner sees when an agent picks up work. Registry pickups mirror the actual claimable task titles instead of the generic claim prompt; deterministic script probes are not mirrored. Bot tokens stay inside the bridge.
 - Live-status watcher now skips the render+POST tick when the agent log has not advanced (size:mtime change-detection), eliminating the idle-time renderer storm that pinned host CPU; verbose updates still fire the instant the log grows. Watcher also self-terminates when its log is removed, preventing orphan watchers across restarts.
 - Documentation now focuses only on the agent-to-MCP bridge contract.
