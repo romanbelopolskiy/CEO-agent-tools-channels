@@ -656,7 +656,7 @@ async function initBots(config: ReturnType<typeof loadConfig>) {
       const me = await telegram.getMe();
       log(`Bot "${botEntry.name}" connected: @${me.username} (${me.first_name})`);
 
-      const ctx: BotContext = { name: botEntry.name, telegram, access };
+      const ctx: BotContext = { name: botEntry.name, telegram, access, topicId: botEntry.topicId };
       botsMap.set(botEntry.name, ctx);
 
       // Only create runtime for the first bot per token (avoids duplicate polling)
@@ -977,6 +977,24 @@ function startPolling(
         for (const update of updates) {
           offset = update.update_id + 1;
 
+          // --- Single-bot Forum Topics routing ---
+          let activeBotName = botName;
+          let activeCtx = ctx;
+          let activeAccess = access;
+          let activePermissions = permissions;
+
+          const msgForTopic = update.message || update.callback_query?.message;
+          if (msgForTopic && typeof msgForTopic.message_thread_id === "number") {
+            for (const [name, bCtx] of botsMap.entries()) {
+              if (bCtx.topicId === msgForTopic.message_thread_id) {
+                activeBotName = name;
+                activeCtx = bCtx;
+                activeAccess = bCtx.access;
+                break;
+              }
+            }
+          }
+
           // --- Inline-button tap (callback_query) ---
           // Forward the tap to the agent over the SAME inbound path normal text
           // uses, then ALWAYS ack to stop Telegram's client-side spinner. The
@@ -995,10 +1013,10 @@ function startPolling(
                 if (
                   cbUserId !== undefined &&
                   cbChatId !== undefined &&
-                  access.isAllowed(cbUserId, cbChatId)
+                  activeAccess.isAllowed(cbUserId, cbChatId)
                 ) {
                   logConversation({
-                    botName,
+                    botName: activeBotName,
                     direction: "inbound",
                     chatId: cbChatId,
                     userId: cbUserId,
@@ -1008,27 +1026,27 @@ function startPolling(
                     text: synthetic.text || "",
                     meta: { isGroup: false, callbackQuery: true },
                   });
-                  log(`[${botName}] Inline button tap from @${cbq.from?.username || cbq.from?.first_name}: ${synthetic.text}`);
+                  log(`[${activeBotName}] Inline button tap from @${cbq.from?.username || cbq.from?.first_name}: ${synthetic.text}`);
                   if (mode === "stdio" && stdioServer) {
-                    emitChannelMessage(stdioServer, botName, synthetic, false, false);
+                    emitChannelMessage(stdioServer, activeBotName, synthetic, false, false);
                   } else {
-                    routeToSessions(botsMap, botName, synthetic, false, false);
+                    routeToSessions(botsMap, activeBotName, synthetic, false, false);
                   }
                 } else {
-                  log(`[${botName}] Inline button tap ignored (user not allowed or no chat context)`);
+                  log(`[${activeBotName}] Inline button tap ignored (user not allowed or no chat context)`);
                 }
               } else {
-                log(`[${botName}] Inline button tap with no routable chat context; acking only`);
+                log(`[${activeBotName}] Inline button tap with no routable chat context; acking only`);
               }
             } catch (cbErr) {
-              log(`[${botName}] callback_query handling error: ${cbErr}`);
+              log(`[${activeBotName}] callback_query handling error: ${cbErr}`);
             }
             // Always acknowledge so the user's button spinner stops, even on
             // ignore/error. Never throw out of the poll loop for an ack failure.
             try {
               await telegram.answerCallbackQuery(cbq.id);
             } catch (ackErr) {
-              log(`[${botName}] answerCallbackQuery failed: ${ackErr}`);
+              log(`[${activeBotName}] answerCallbackQuery failed: ${ackErr}`);
             }
             continue;
           }
@@ -1059,50 +1077,53 @@ function startPolling(
               return false;
             });
 
-            const botMentioned = mentionedInText || mentionedViaEntity;
+            let botMentioned = mentionedInText || mentionedViaEntity;
+            if (msg.message_thread_id !== undefined && msg.message_thread_id === activeCtx.topicId) {
+              botMentioned = true;
+            }
             const isReplyToBot = !!(msg.reply_to_message?.from?.id === me.id);
 
             if (groupPolicy === "mention-only" && !botMentioned && !isReplyToBot) continue;
-            if (groupPolicy === "allowlist" && !access.isAllowed(userId, msg.chat.id)) continue;
+            if (groupPolicy === "allowlist" && !activeAccess.isAllowed(userId, msg.chat.id)) continue;
 
             let text = msg.text || msg.caption || "";
             if (botUsername && text.toLowerCase().includes(`@${botUsername}`)) {
               text = text.replace(new RegExp(`@${botUsername}`, "gi"), "").trim();
             }
 
-            text = await enrichMedia(telegram, msg, text, botName);
+            text = await enrichMedia(telegram, msg, text, activeBotName);
             if (!text || text.trim() === "") text = "[message received - no text content]";
             (msg as unknown as Record<string, unknown>).text = text;
 
-            const permResult = permissions.tryMatch(text);
+            const permResult = activePermissions.tryMatch(text);
             if (permResult) {
               if (mode === "stdio" && stdioServer) {
                 emitPermissionResponse(stdioServer, permResult.requestId, permResult.approved);
               } else {
                 // Broadcast to all sessions for this bot
                 for (const [, session] of sseSessions) {
-                  if (session.botName === null || session.botName === botName) {
+                  if (session.botName === null || session.botName === activeBotName) {
                     emitPermissionResponse(session.server, permResult.requestId, permResult.approved);
                   }
                 }
               }
               const emoji = permResult.approved ? "\u2705" : "\u274C";
-              await telegram.sendMessage(msg.chat.id, `${emoji} Permission ${permResult.approved ? "granted" : "denied"}.`);
+              await telegram.sendMessage(msg.chat.id, `${emoji} Permission ${permResult.approved ? "granted" : "denied"}.`, "Markdown", undefined, msg.message_thread_id);
               continue;
             }
 
             // Passthrough (any `/<cmd>`) is only allowed to sender who is on the access list
             // for this chat — an un-paired group member can still send the legacy static
             // triggers (/stop, /status, /compact), preserving v3.1.x behavior.
-            const groupAllowPassthrough = access.isAllowed(userId, msg.chat.id);
-            const stopReply = await tryHandleCommand(botName, msg.chat.id, text, { allowPassthrough: groupAllowPassthrough });
+            const groupAllowPassthrough = activeAccess.isAllowed(userId, msg.chat.id);
+            const stopReply = await tryHandleCommand(activeBotName, msg.chat.id, text, { allowPassthrough: groupAllowPassthrough });
             if (stopReply) {
-              await telegram.sendMessage(msg.chat.id, stopReply);
+              await telegram.sendMessage(msg.chat.id, stopReply, "Markdown", undefined, msg.message_thread_id);
               continue;
             }
 
             logConversation({
-              botName,
+              botName: activeBotName,
               direction: "inbound",
               chatId: msg.chat.id,
               userId,
@@ -1117,22 +1138,22 @@ function startPolling(
                 isReplyToBot,
               },
             });
-            log(`[${botName}] Group msg from @${msg.from!.username || msg.from!.first_name} in "${msg.chat.title || msg.chat.id}"`);
+            log(`[${activeBotName}] Group msg from @${msg.from!.username || msg.from!.first_name} in "${msg.chat.title || msg.chat.id}"`);
 
             {
               const deliver = () => {
                 if (mode === "stdio" && stdioServer) {
-                  emitChannelMessage(stdioServer, botName, msg, botMentioned, isReplyToBot);
+                  emitChannelMessage(stdioServer, activeBotName, msg, botMentioned, isReplyToBot);
                 } else {
-                  routeToSessions(botsMap, botName, msg, botMentioned, isReplyToBot);
+                  routeToSessions(botsMap, activeBotName, msg, botMentioned, isReplyToBot);
                 }
               };
               const triggerCompact = () => {
-                tryHandleCommand(botName, msg.chat.id, "compact").catch((err) =>
-                  log(`[${botName}] auto-compact trigger error: ${err}`)
+                tryHandleCommand(activeBotName, msg.chat.id, "compact").catch((err) =>
+                  log(`[${activeBotName}] auto-compact trigger error: ${err}`)
                 );
               };
-              const gated = await maybeGate(botName, msg.chat.id, triggerCompact, deliver);
+              const gated = await maybeGate(activeBotName, msg.chat.id, triggerCompact, deliver);
               if (!gated) deliver();
             }
             continue;
@@ -1140,45 +1161,45 @@ function startPolling(
 
           // --- Private chat ---
           let text = msg.text || msg.caption || "";
-          text = await enrichMedia(telegram, msg, text, botName);
+          text = await enrichMedia(telegram, msg, text, activeBotName);
           if (!text || text.trim() === "") text = "[message received - no text content]";
           (msg as unknown as Record<string, unknown>).text = text;
 
-          const permResult = permissions.tryMatch(text);
+          const permResult = activePermissions.tryMatch(text);
           if (permResult) {
             if (mode === "stdio" && stdioServer) {
               emitPermissionResponse(stdioServer, permResult.requestId, permResult.approved);
             } else {
               for (const [, session] of sseSessions) {
-                if (session.botName === null || session.botName === botName) {
+                if (session.botName === null || session.botName === activeBotName) {
                   emitPermissionResponse(session.server, permResult.requestId, permResult.approved);
                 }
               }
             }
             const emoji = permResult.approved ? "\u2705" : "\u274C";
-            await telegram.sendMessage(msg.chat.id, `${emoji} Permission ${permResult.approved ? "granted" : "denied"}.`);
+            await telegram.sendMessage(msg.chat.id, `${emoji} Permission ${permResult.approved ? "granted" : "denied"}.`, "Markdown", undefined, msg.message_thread_id);
             continue;
           }
 
-          if (!access.isAllowed(userId, msg.chat.id)) {
+          if (!activeAccess.isAllowed(userId, msg.chat.id)) {
             if (!pairingNotified.has(userId)) {
               pairingNotified.add(userId);
-              const code = access.generatePairingCode(userId, msg.chat.id);
-              log(`[${botName}] Pairing code "${code}" for user ${userId}`);
-              await telegram.sendMessage(msg.chat.id, `\`pair code ${code}\``);
+              const code = activeAccess.generatePairingCode(userId, msg.chat.id);
+              log(`[${activeBotName}] Pairing code "${code}" for user ${userId}`);
+              await telegram.sendMessage(msg.chat.id, `\`pair code ${code}\``, "Markdown", undefined, msg.message_thread_id);
             }
             continue;
           }
 
-          const stopReply = await tryHandleCommand(botName, msg.chat.id, text);
+          const stopReply = await tryHandleCommand(activeBotName, msg.chat.id, text);
           if (stopReply) {
-            await telegram.sendMessage(msg.chat.id, stopReply);
+            await telegram.sendMessage(msg.chat.id, stopReply, "Markdown", undefined, msg.message_thread_id);
             continue;
           }
 
           pairingNotified.delete(userId);
           logConversation({
-            botName,
+            botName: activeBotName,
             direction: "inbound",
             chatId: msg.chat.id,
             userId,
@@ -1188,22 +1209,22 @@ function startPolling(
             text,
             meta: { isGroup: false },
           });
-          log(`[${botName}] DM from @${msg.from!.username || msg.from!.first_name}: ${text.substring(0, 50)}...`);
+          log(`[${activeBotName}] DM from @${msg.from!.username || msg.from!.first_name}: ${text.substring(0, 50)}...`);
 
           {
             const deliver = () => {
               if (mode === "stdio" && stdioServer) {
-                emitChannelMessage(stdioServer, botName, msg, false, false);
+                emitChannelMessage(stdioServer, activeBotName, msg, false, false);
               } else {
-                routeToSessions(botsMap, botName, msg, false, false);
+                routeToSessions(botsMap, activeBotName, msg, false, false);
               }
             };
             const triggerCompact = () => {
-              tryHandleCommand(botName, msg.chat.id, "compact").catch((err) =>
-                log(`[${botName}] auto-compact trigger error: ${err}`)
+              tryHandleCommand(activeBotName, msg.chat.id, "compact").catch((err) =>
+                log(`[${activeBotName}] auto-compact trigger error: ${err}`)
               );
             };
-            const gated = await maybeGate(botName, msg.chat.id, triggerCompact, deliver);
+            const gated = await maybeGate(activeBotName, msg.chat.id, triggerCompact, deliver);
             if (!gated) deliver();
           }
         }

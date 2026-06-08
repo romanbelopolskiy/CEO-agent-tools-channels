@@ -15,6 +15,7 @@ export interface BotContext {
   name: string;
   telegram: TelegramClient;
   access: AccessControl;
+  topicId?: number;
 }
 
 const TOOLS = [
@@ -207,8 +208,8 @@ export function registerTools(
             return t.length ? t : undefined;
           })();
           const sent = filePath
-            ? await bot.telegram.sendDocument(chatId, filePath, taggedCaption, "Markdown", replyMarkup)
-            : await bot.telegram.sendMessage(chatId, taggedText, "Markdown", replyMarkup);
+            ? await bot.telegram.sendDocument(chatId, filePath, taggedCaption, "Markdown", replyMarkup, bot.topicId)
+            : await bot.telegram.sendMessage(chatId, taggedText, "Markdown", replyMarkup, bot.topicId);
           logConversation({
             botName,
             direction: "outbound",

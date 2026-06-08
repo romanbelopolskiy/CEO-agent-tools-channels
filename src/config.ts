@@ -11,6 +11,7 @@ export interface BotEntry {
   name: string;
   token: string;
   accessListPath: string;
+  topicId?: number;
 }
 
 export interface Config {
@@ -23,6 +24,7 @@ interface BotsRegistry {
   [botName: string]: {
     token: string;
     accessList?: string;
+    topic_id?: number;
   };
 }
 
@@ -68,6 +70,7 @@ export function loadConfig(): Config {
       name,
       token: entry.token,
       accessListPath: entry.accessList || resolve(homedir(), ".claude", `telegram-access-${name}.json`),
+      topicId: typeof entry.topic_id === "number" ? entry.topic_id : undefined,
     };
   });
 
