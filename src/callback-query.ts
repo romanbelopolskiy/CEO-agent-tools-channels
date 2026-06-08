@@ -50,5 +50,6 @@ export function synthesizeCallbackMessage(
     chat,
     date: cbq.message?.date ?? Math.floor(Date.now() / 1000),
     text: buildCallbackText(cbq.data),
+    message_thread_id: cbq.message?.message_thread_id,
   };
 }

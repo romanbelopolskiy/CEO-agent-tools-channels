@@ -86,8 +86,9 @@ function compactLiveStatus(text: string): string {
   const activityLine = [...lines]
     .reverse()
     .find((line) =>
-      /^[✻✢✶✽✦✧✷✸✹●◐◑◒◓⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(line) ||
-      /\b(Perusing|Pondering|Thinking|Tinkering|Calling|Reading|Searching|Writing|Editing|Running)\b/.test(line)
+      /^[✻✢✶✽✦✧✷✸✹●◐◑◒◓⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏·•\-*]/.test(line) ||
+      /\b(Perusing|Pondering|Thinking|Tinkering|Calling|Reading|Searching|Writing|Editing|Running|Gitifying|Reticulating|Analyzing|Testing|Compiling|Building|Generating|Working)\b/i.test(line) ||
+      line.includes("…")
     );
 
   if (activityLine && hudLine) return `${activityLine}\n  ${hudLine}`;
@@ -272,7 +273,7 @@ async function tryHandleCommand(
   botName: string,
   chatId: number,
   text: string,
-  opts: { allowPassthrough?: boolean } = {},
+  opts: { allowPassthrough?: boolean; messageThreadId?: number } = {},
 ): Promise<string | null> {
   const { allowPassthrough = true } = opts;
   const raw = text.trim();
@@ -346,6 +347,7 @@ async function tryHandleCommand(
       chatId,
       sourceMessageId: 0,
       mode: telemetryMode,
+      messageThreadId: opts.messageThreadId,
     }).catch((err) => log(`[${botName}] status startTask error for /${cmd.name}: ${err}`));
     log(`[${botName}] synthetic task ${taskId} created for /${cmd.name} streaming`);
   }
@@ -551,6 +553,7 @@ function onDelivered(botsMap: Map<string, BotContext>, botName: string, msg: any
       chatId,
       sourceMessageId: msg.message_id || 0,
       mode: telemetryMode,
+      messageThreadId: msg.message_thread_id,
     }).catch((err) => log(`status startTask error: ${err}`));
   }
 }
@@ -615,9 +618,21 @@ async function routeToSessions(
   log(`SSE session for "${botName}" not ready (aliases: ${aliases.join(",")}); message queued for replay`);
   if (chatId && firstForBot) {
     const bot = botsMap.get(botName);
-    bot?.telegram
-      .sendMessage(chatId, "⏳ Агент перезапускается после простоя — отвечу через ~минуту. Сообщение сохранил, повторять не нужно.")
-      .catch(() => {});
+    if (bot) {
+      bot.telegram
+        .sendMessage(chatId, "⏳ Агент перезапускается после простоя — отвечу через ~минуту. Сообщение сохранил, повторять не нужно.", "Markdown", undefined, bot.topicId)
+        .then((sent) => {
+          logConversation({
+            botName,
+            direction: "system",
+            chatId,
+            messageId: sent?.message_id,
+            text: "⏳ Агент перезапускается после простоя — отвечу через ~минуту. Сообщение сохранил, повторять не нужно.",
+            meta: { kind: "idle-restart-warning" }
+          });
+        })
+        .catch(() => {});
+    }
   }
 }
 
@@ -830,9 +845,12 @@ async function startSseServer(
         // for headless setups; if neither is present, skip — no real chat IDs
         // are hardcoded here so the repo stays sanitized.
         const envChat = Number(process.env.INJECT_MIRROR_DEFAULT_CHAT || "");
-        const chatId =
+        let chatId =
           bot.access.listUsers()[0] ??
           (Number.isFinite(envChat) && envChat !== 0 ? envChat : 0);
+        if (bot.topicId && bot.access.listChats().length > 0) {
+          chatId = bot.access.listChats()[0];
+        }
         if (!chatId) {
           debug(`inject-mirror: no allowlisted chat for bot "${botName}", skipping`);
           res.writeHead(200, { "Content-Type": "text/plain" });
@@ -847,7 +865,7 @@ async function startSseServer(
         try {
           // Plain text (parseMode ""): task titles/prompts may contain Markdown
           // metacharacters; we must not let them break or reinterpret the copy.
-          const sent = await bot.telegram.sendMessage(chatId, message, "");
+          const sent = await bot.telegram.sendMessage(chatId, message, "", undefined, bot.topicId);
           logConversation({
             botName,
             direction: "system",
@@ -863,6 +881,116 @@ async function startSseServer(
         }
         res.writeHead(200, { "Content-Type": "text/plain" });
         res.end("ok");
+      } catch {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("bad json");
+      }
+      return;
+    }
+
+    // --- Inject prompt directly to agent session (Orchestrator endpoint) ---
+    if (req.method === "POST" && url.pathname === "/inject") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      try {
+        const data = JSON.parse(body) as {
+          botName?: string;
+          text?: string;
+          sender?: string;
+        };
+        const botName = typeof data.botName === "string" ? data.botName.trim() : "";
+        const rawText = typeof data.text === "string" ? data.text.trim() : "";
+        const sender = typeof data.sender === "string" ? data.sender.trim() : "System";
+        if (!botName || !rawText) {
+          res.writeHead(400, { "Content-Type": "text/plain" });
+          res.end("missing botName or text");
+          return;
+        }
+        const bot = botsMap.get(botName);
+        if (!bot) {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("unknown bot");
+          return;
+        }
+
+        // Ensure agent is awake and connected
+        const isReady = await ensureSessionForDelivery(botName, botsMap);
+        if (!isReady) {
+          res.writeHead(504, { "Content-Type": "text/plain" });
+          res.end("agent failed to wake up");
+          return;
+        }
+
+        const envChat = Number(process.env.INJECT_MIRROR_DEFAULT_CHAT || "");
+        let chatId =
+          bot.access.listUsers()[0] ??
+          (Number.isFinite(envChat) && envChat !== 0 ? envChat : 0);
+        if (bot.topicId && bot.access.listChats().length > 0) {
+          chatId = bot.access.listChats()[0];
+        }
+
+        if (chatId) {
+          const message = `📥 [TASK from ${sender}]:\n\n${rawText}`;
+          try {
+            const sent = await bot.telegram.sendMessage(chatId, message, "", undefined, bot.topicId);
+            logConversation({
+              botName,
+              direction: "system",
+              chatId,
+              messageId: sent?.message_id,
+              text: message,
+              meta: { kind: "inject-task", sender }
+            });
+          } catch (err) {
+            debug(`inject sendMessage failed for ${botName}: ${(err as Error).message}`);
+          }
+        }
+
+        // Create synthetic message to inject to Claude Code
+        const syntheticMessage = {
+          message_id: Math.floor(Math.random() * 100000) + 50000,
+          from: {
+            id: 186356295,
+            is_bot: false,
+            first_name: sender,
+            username: sender
+          },
+          chat: {
+            id: chatId || -1003929533682,
+            type: "supergroup"
+          },
+          message_thread_id: bot.topicId,
+          text: rawText,
+          date: Math.floor(Date.now() / 1000)
+        };
+
+        const aliases = getBotAliases(botName, botsMap);
+        let delivered = false;
+        for (const [, session] of sseSessions) {
+          if (session.botName === null || aliases.includes(session.botName)) {
+            emitChannelMessage(session.server, botName, syntheticMessage, true, false);
+            delivered = true;
+          }
+        }
+
+        if (delivered) {
+          logConversation({
+            botName,
+            direction: "inbound",
+            chatId: syntheticMessage.chat.id,
+            userId: syntheticMessage.from.id,
+            username: syntheticMessage.from.username,
+            messageId: syntheticMessage.message_id,
+            chatType: syntheticMessage.chat.type,
+            text: syntheticMessage.text,
+            meta: { isGroup: syntheticMessage.chat.type !== "private", injected: true, sender }
+          });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "success", message: "Task injected successfully" }));
+        } else {
+          res.writeHead(500, { "Content-Type": "text/plain" });
+          res.end("failed to deliver message to sse session");
+        }
       } catch {
         res.writeHead(400, { "Content-Type": "text/plain" });
         res.end("bad json");
@@ -1108,7 +1236,16 @@ function startPolling(
                 }
               }
               const emoji = permResult.approved ? "\u2705" : "\u274C";
-              await telegram.sendMessage(msg.chat.id, `${emoji} Permission ${permResult.approved ? "granted" : "denied"}.`, "Markdown", undefined, msg.message_thread_id);
+              const pMsg = `${emoji} Permission ${permResult.approved ? "granted" : "denied"}.`;
+              const sent = await telegram.sendMessage(msg.chat.id, pMsg, "Markdown", undefined, msg.message_thread_id);
+              logConversation({
+                botName: activeBotName,
+                direction: "system",
+                chatId: msg.chat.id,
+                messageId: sent?.message_id,
+                text: pMsg,
+                meta: { kind: "permission-response", approved: permResult.approved }
+              });
               continue;
             }
 
@@ -1116,9 +1253,20 @@ function startPolling(
             // for this chat — an un-paired group member can still send the legacy static
             // triggers (/stop, /status, /compact), preserving v3.1.x behavior.
             const groupAllowPassthrough = activeAccess.isAllowed(userId, msg.chat.id);
-            const stopReply = await tryHandleCommand(activeBotName, msg.chat.id, text, { allowPassthrough: groupAllowPassthrough });
+            const stopReply = await tryHandleCommand(activeBotName, msg.chat.id, text, {
+              allowPassthrough: groupAllowPassthrough,
+              messageThreadId: msg.message_thread_id,
+            });
             if (stopReply) {
-              await telegram.sendMessage(msg.chat.id, stopReply, "Markdown", undefined, msg.message_thread_id);
+              const sent = await telegram.sendMessage(msg.chat.id, stopReply, "Markdown", undefined, msg.message_thread_id);
+              logConversation({
+                botName: activeBotName,
+                direction: "system",
+                chatId: msg.chat.id,
+                messageId: sent?.message_id,
+                text: stopReply,
+                meta: { kind: "command-reply" }
+              });
               continue;
             }
 
@@ -1149,7 +1297,9 @@ function startPolling(
                 }
               };
               const triggerCompact = () => {
-                tryHandleCommand(activeBotName, msg.chat.id, "compact").catch((err) =>
+                tryHandleCommand(activeBotName, msg.chat.id, "compact", {
+                  messageThreadId: msg.message_thread_id,
+                }).catch((err) =>
                   log(`[${activeBotName}] auto-compact trigger error: ${err}`)
                 );
               };
@@ -1177,7 +1327,16 @@ function startPolling(
               }
             }
             const emoji = permResult.approved ? "\u2705" : "\u274C";
-            await telegram.sendMessage(msg.chat.id, `${emoji} Permission ${permResult.approved ? "granted" : "denied"}.`, "Markdown", undefined, msg.message_thread_id);
+            const pMsg = `${emoji} Permission ${permResult.approved ? "granted" : "denied"}.`;
+            const sent = await telegram.sendMessage(msg.chat.id, pMsg, "Markdown", undefined, msg.message_thread_id);
+            logConversation({
+              botName: activeBotName,
+              direction: "system",
+              chatId: msg.chat.id,
+              messageId: sent?.message_id,
+              text: pMsg,
+              meta: { kind: "permission-response", approved: permResult.approved }
+            });
             continue;
           }
 
@@ -1186,14 +1345,31 @@ function startPolling(
               pairingNotified.add(userId);
               const code = activeAccess.generatePairingCode(userId, msg.chat.id);
               log(`[${activeBotName}] Pairing code "${code}" for user ${userId}`);
-              await telegram.sendMessage(msg.chat.id, `\`pair code ${code}\``, "Markdown", undefined, msg.message_thread_id);
+              const pMsg = `\`pair code ${code}\``;
+              const sent = await telegram.sendMessage(msg.chat.id, pMsg, "Markdown", undefined, msg.message_thread_id);
+              logConversation({
+                botName: activeBotName,
+                direction: "system",
+                chatId: msg.chat.id,
+                messageId: sent?.message_id,
+                text: pMsg,
+                meta: { kind: "pairing-code" }
+              });
             }
             continue;
           }
 
-          const stopReply = await tryHandleCommand(activeBotName, msg.chat.id, text);
+          const stopReply = await tryHandleCommand(activeBotName, msg.chat.id, text, { messageThreadId: msg.message_thread_id });
           if (stopReply) {
-            await telegram.sendMessage(msg.chat.id, stopReply, "Markdown", undefined, msg.message_thread_id);
+            const sent = await telegram.sendMessage(msg.chat.id, stopReply, "Markdown", undefined, msg.message_thread_id);
+            logConversation({
+              botName: activeBotName,
+              direction: "system",
+              chatId: msg.chat.id,
+              messageId: sent?.message_id,
+              text: stopReply,
+              meta: { kind: "command-reply" }
+            });
             continue;
           }
 
@@ -1220,7 +1396,7 @@ function startPolling(
               }
             };
             const triggerCompact = () => {
-              tryHandleCommand(activeBotName, msg.chat.id, "compact").catch((err) =>
+              tryHandleCommand(activeBotName, msg.chat.id, "compact", { messageThreadId: msg.message_thread_id }).catch((err) =>
                 log(`[${activeBotName}] auto-compact trigger error: ${err}`)
               );
             };

@@ -271,7 +271,10 @@ export function registerTools(
                 log(`Sending authorization confirmation to chat ${result.chatId} for bot "${botName}"`);
                 bot.telegram.sendMessage(
                   result.chatId,
-                  `✅ Bot authorized as *${botName}*. You can now send messages.`
+                  `✅ Bot authorized as *${botName}*. You can now send messages.`,
+                  "Markdown",
+                  undefined,
+                  bot.topicId
                 ).catch((err) => { log(`Failed to send auth confirmation: ${err}`); });
               }
               return {

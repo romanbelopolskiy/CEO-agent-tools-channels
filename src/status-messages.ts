@@ -61,6 +61,7 @@ export interface TaskStatusState {
   chatId: number;
   sourceMessageId: number;
   statusMessageId?: number;
+  messageThreadId?: number;
   model?: string;
   effort?: string;
   mode: VerbosityMode;
@@ -145,6 +146,7 @@ export class StatusManager {
     mode: VerbosityMode;
     model?: string;
     effort?: string;
+    messageThreadId?: number;
   }): Promise<void> {
     // When a new user message arrives for the same (bot, chat), finalize any
     // prior active task so streaming flows to the latest status
@@ -161,6 +163,7 @@ export class StatusManager {
       botName: opts.botName,
       chatId: opts.chatId,
       sourceMessageId: opts.sourceMessageId,
+      messageThreadId: opts.messageThreadId,
       mode: opts.mode,
       model: opts.model,
       effort: opts.effort,
@@ -278,7 +281,7 @@ export class StatusManager {
 
     const text = renderStatus(event, state);
     try {
-      const sent = await client.sendMessage(state.chatId, text);
+      const sent = await client.sendMessage(state.chatId, text, "Markdown", undefined, state.messageThreadId);
       state.statusMessageId = (sent as TelegramMessage).message_id;
       state.lastRenderedText = text;
       state.lastRenderAt = Date.now();
